@@ -34,11 +34,18 @@
 
 @interface YubiKey : NSObject {
     BOOL suspend;
+    BOOL stateKnown;
+    BOOL changingState;
+    NSString *selectedVendorID;
+    NSString *selectedProductID;
+    IOHIDManagerRef removalManager;
 }
 
 -(id)init;
 -(BOOL)action:(NSString *)action;
 -(BOOL)state;
+-(BOOL)isStateKnown;
+-(BOOL)isChangingState;
 -(BOOL)enable;
 -(BOOL)disable;
 -(void)notificationReloadHandler:(NSNotification *)notification;

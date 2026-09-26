@@ -112,6 +112,7 @@ Preference window:
 
 # Known Issues
 
+- A question mark in the menu bar means YubiSwitch could not confirm the key's state. Try enabling it again after the USB device has finished appearing. If the privileged helper restarted while the key was deconfigured, unplug and reconnect the key before retrying. AppleScript exposes `statusKnown` to distinguish an unknown state from a confirmed disabled state.
 - The app's default settings support the Nano. If you have a different model, go into the app's `Preferences` by clicking on the menu icon, then set the the `Product ID` to `0x0114` (or whatever your ProductID is) see: [How to find ProductID and VendorID](#how-to-find-productid-and-vendorid).
 - If your YubiKey is not working, you might want to confirm the `Product ID` and `Vendor ID` follow the how to find your ProductID and VendorID steps below
 - This app only works with recent version of OSX because it relies on the Notification Centre. OSX 10.8.x and above would do it. Sorry about that.

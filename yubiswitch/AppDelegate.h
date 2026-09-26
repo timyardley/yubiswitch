@@ -31,6 +31,7 @@
     IBOutlet NSMenu* statusMenu;
     NSStatusItem* statusItem;
     bool isEnabled;
+    bool displayedStateKnown;
     YubiKey* yk;
     NSTimer *m_timer;
     AboutWindowController* aboutwc;
@@ -57,5 +58,6 @@
 -(void)lockComputer;
 -(bool)application:(NSApplication *)sender delegateHandlesKey:(NSString *)key;
 -(bool)status;
+-(bool)statusKnown;
 
 @end

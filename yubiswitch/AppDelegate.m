@@ -56,20 +56,41 @@
 }
 
 - (void)updateMenuState:(NSTimer *)foo {
-    if (yk != NULL) {
-        if (isEnabled && [yk state]) { // inverted this means change
-            NSLog(@"noticed change...");
-            [statusItem.button setToolTip:(@"YubiKey disabled")];
-            [statusItem.button setImage:[NSImage imageNamed:@"YubikeyDisabled"]];
-            isEnabled = false;
-            [[statusMenu itemAtIndex:0] setState:0];
-            [self notify:@"YubiKey disabled"];
-        }
+    if (yk == nil) return;
+    if (![yk isStateKnown]) {
+        [self showUnknownState];
+        return;
     }
+    BOOL enabled = ![yk state];
+    if (displayedStateKnown && isEnabled == enabled) return;
+    displayedStateKnown = true;
+    isEnabled = enabled;
+    [statusItem.button setTitle:@""];
+    [statusItem.button setToolTip:enabled ? @"YubiKey enabled" : @"YubiKey disabled"];
+    [statusItem.button setImage:[NSImage imageNamed:
+                                 enabled ? @"YubikeyEnabled" : @"YubikeyDisabled"]];
+    [[statusMenu itemAtIndex:0] setState:enabled ? 1 : 0];
+    [self notify:enabled ? @"YubiKey enabled" : @"YubiKey disabled"];
+}
+
+- (void)showUnknownState {
+    displayedStateKnown = false;
+    [statusItem.button setImage:nil];
+    [statusItem.button setTitle:@"?"];
+    [statusItem.button setToolTip:@"YubiKey status unknown"];
+    [[statusMenu itemAtIndex:0] setState:NSControlStateValueMixed];
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     yk = [[YubiKey alloc] init];
-    [yk disable];
+    BOOL disabled = [yk disable];
+    [self updateMenuState:nil];
+    if (!disabled) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert setAlertStyle:NSAlertStyleWarning];
+        [alert setMessageText:@"Could not disable the YubiKey"];
+        [alert setInformativeText:@"YubiSwitch could not confirm that the key was disabled. Check its connection, then try again."];
+        [alert runModal];
+    }
     state_monitor = [[ComputerStateMonitor alloc] initWithYubiKey:yk];
     UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
     [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
@@ -78,7 +99,6 @@
             NSLog(@"Notification permission not granted");
         }
     }];
-    [self notify:@"YubiKey disabled"];
     aboutwc = [[AboutWindowController alloc]
                initWithWindowNibName:@"AboutWindowController"];
     prefwc = [[PreferencesController alloc]
@@ -90,10 +110,8 @@
     statusItem = [[NSStatusBar systemStatusBar]
                   statusItemWithLength:NSVariableStatusItemLength];
     [statusItem setMenu:statusMenu];
-    [statusItem.button setImage:[NSImage imageNamed:@"YubikeyDisabled"]];
-    [statusItem.button setToolTip:@"YubiKey disabled"];
-
     isEnabled = false;
+    [self showUnknownState];
 
     // setup observer method, when the global hotkey is changed in the
     // preference controller this method gets notified.
@@ -172,11 +190,15 @@
     BOOL res;
     res = [yk disable];
     if (res == TRUE) {
+        displayedStateKnown = true;
+        [statusItem.button setTitle:@""];
         [statusItem.button setToolTip:(@"YubiKey disabled")];
         [statusItem.button setImage:[NSImage imageNamed:@"YubikeyDisabled"]];
         isEnabled = false;
         [[statusMenu itemAtIndex:0] setState:0];
         [self notify:@"YubiKey disabled"];
+    } else {
+        [self showUnknownState];
     }
 }
 
@@ -188,6 +210,8 @@
         res = [yk disable];
     }
     if (res == TRUE) {
+        displayedStateKnown = true;
+        [statusItem.button setTitle:@""];
         [reDisableTimer invalidate];
         reDisableTimer = nil;
         if (enable == TRUE) {
@@ -213,19 +237,35 @@
             [[statusMenu itemAtIndex:0] setState:0];
             [self notify:@"YubiKey disabled"];
         }
+    } else {
+        [self showUnknownState];
+        if (enable) {
+            NSAlert *alert = [[NSAlert alloc] init];
+            [alert setAlertStyle:NSAlertStyleWarning];
+            [alert setMessageText:@"Could not fully enable the YubiKey"];
+            [alert setInformativeText:@"YubiSwitch could not confirm that the key is ready. Check its connection, then try enabling it again."];
+            [alert runModal];
+        }
     }
 }
 
 -(bool)application:(NSApplication *)sender delegateHandlesKey:(NSString *)key {
-    return [key isEqualToString:@"status"]; 
+    return [key isEqualToString:@"status"] ||
+           [key isEqualToString:@"statusKnown"];
 }
 
 - (bool)status {
-    return isEnabled;
+    return [yk isStateKnown] && isEnabled;
+}
+
+- (bool)statusKnown {
+    return [yk isStateKnown];
 }
 
 - (IBAction)toggle:(id)sender {
-    if (isEnabled == TRUE) {
+    if (![yk isStateKnown]) {
+        [self enableYubiKey:TRUE];
+    } else if (isEnabled == TRUE) {
         [self enableYubiKey:FALSE];
     } else {
         [self enableYubiKey:TRUE];
@@ -263,7 +303,14 @@
 }
 
 - (IBAction)quit:(id)sender {
-    [yk enable];
+    if (![yk enable]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert setAlertStyle:NSAlertStyleWarning];
+        [alert setMessageText:@"Could not restore the YubiKey"];
+        [alert setInformativeText:@"YubiSwitch will stay open so you can retry enabling the key before quitting."];
+        [alert runModal];
+        return;
+    }
     [self notify:@"YubiKey enabled"];
     [reDisableTimer invalidate];
     reDisableTimer = nil;

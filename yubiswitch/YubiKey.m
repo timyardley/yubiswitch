@@ -24,6 +24,14 @@
 // itself controls the USB device
 
 #include <IOKit/hid/IOHIDManager.h>
+#include <stdint.h>
+
+@interface YubiKey ()
+- (BOOL)action:(NSString *)action vendorID:(NSString *)vendor
+       productID:(NSString *)product;
+- (void)registerKeyRemovalWithVendorID:(NSString *)vendor
+                              productID:(NSString *)product;
+@end
 
 @implementation YubiKey
 
@@ -54,7 +62,6 @@
                 exit(EXIT_FAILURE);
             }
         }
-        [self disable];
         [self registerKeyRemoval];
     }
     return self;
@@ -175,18 +182,60 @@
 
 - (void)notificationReloadHandler:(NSNotification *)notification {
     if ([[notification name] isEqualToString:@"changeDefaultsPrefs"]) {
-        [self disable];
+        NSMutableDictionary *preferences = (NSMutableDictionary *)[notification object];
+        NSString *vendor = preferences[@"hotKeyVendorID"];
+        NSString *product = preferences[@"hotKeyProductID"];
+        if ([vendor isEqualToString:selectedVendorID] &&
+            [product isEqualToString:selectedProductID]) {
+            preferences[@"applySucceeded"] = @YES;
+            return;
+        }
+        if (suspend || !stateKnown) {
+            if (![self action:@"disable" vendorID:vendor productID:product]) {
+                preferences[@"applySucceeded"] = @NO;
+                return;
+            }
+        }
+        [self registerKeyRemovalWithVendorID:vendor productID:product];
+        preferences[@"applySucceeded"] = @YES;
     }
 }
 
+static BOOL parseHexID(NSString *text, unsigned int *value) {
+    if (![text isKindOfClass:[NSString class]]) return NO;
+    NSScanner *scanner = [NSScanner scannerWithString:text];
+    *value = 0;
+    return [scanner scanHexInt:value] && [scanner isAtEnd] &&
+           *value > 0 && *value <= UINT16_MAX;
+}
+
 - (BOOL)action:(NSString *)action {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    return [self action:action
+              vendorID:[defaults stringForKey:@"hotKeyVendorID"]
+             productID:[defaults stringForKey:@"hotKeyProductID"]];
+}
+
+- (BOOL)action:(NSString *)action vendorID:(NSString *)vendor
+       productID:(NSString *)product {
+    BOOL enabling = [action isEqualToString:@"enable"];
+    if (!enabling && ![action isEqualToString:@"disable"]) return NO;
+    unsigned int idVendor = 0;
+    unsigned int idProduct = 0;
+    if (!parseHexID(vendor, &idVendor) ||
+        !parseHexID(product, &idProduct)) {
+        stateKnown = NO;
+        NSLog(@"Invalid YubiKey vendor or product filter");
+        return NO;
+    }
     xpc_connection_t connection = xpc_connection_create_mach_service(
                                                                      "com.zgilburd.yubiswitch.helper", NULL,
                                                                      XPC_CONNECTION_MACH_SERVICE_PRIVILEGED);
 
     if (!connection) {
         [self raiseAlertWindow:@"Failed to create XPC connection with helper"];
-        exit(EXIT_FAILURE);
+        stateKnown = NO;
+        return NO;
     }
 
     xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
@@ -205,34 +254,21 @@
         }
     });
 
-    unsigned int idVendor = 0;
-    NSString *value =
-        [[NSUserDefaults standardUserDefaults] stringForKey:@"hotKeyVendorID"];
-    [[NSScanner scannerWithString:value] scanHexInt:&idVendor];
-
-    unsigned int idProduct = 0;
-    value =
-        [[NSUserDefaults standardUserDefaults] stringForKey:@"hotKeyProductID"];
-    [[NSScanner scannerWithString:value] scanHexInt:&idProduct];
-
+    changingState = YES;
     xpc_connection_resume(connection);
     xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
     xpc_dictionary_set_int64(message, "idVendor", idVendor);
     xpc_dictionary_set_int64(message, "idProduct", idProduct);
-    if ([action isEqualToString:@"enable"]) {
-        xpc_dictionary_set_int64(message, "request", 1);
-        suspend = FALSE;
-    } else if ([action isEqualToString:@"disable"]) {
-        xpc_dictionary_set_int64(message, "request", 0);
-        suspend = TRUE;
-    }
-    const char *response = NULL;
+    xpc_dictionary_set_int64(message, "request", enabling ? 1 : 0);
     xpc_object_t event = xpc_connection_send_message_with_reply_sync(connection, message);
-    response = xpc_dictionary_get_string(event, "reply");
-    if (response == NULL) {
-        return FALSE;
-    }
-    return TRUE;
+    const char *response = xpc_get_type(event) == XPC_TYPE_DICTIONARY ?
+        xpc_dictionary_get_string(event, "reply") : NULL;
+    BOOL succeeded = response != NULL && strcmp(response, "OK") == 0;
+    stateKnown = succeeded;
+    if (succeeded) suspend = !enabling;
+    changingState = NO;
+    xpc_connection_cancel(connection);
+    return succeeded;
     // NSAppleScript *lockScript = [[NSAppleScript alloc]
     // initWithSource:@"activate application \"ScreenSaverEngine\""];
     // [lockScript executeAndReturnError:nil];
@@ -240,6 +276,12 @@
 
 - (BOOL)state {
     return suspend;
+}
+- (BOOL)isStateKnown {
+    return stateKnown;
+}
+- (BOOL)isChangingState {
+    return changingState;
 }
 - (BOOL)enable {
     return [self action:@"enable"];
@@ -254,6 +296,8 @@
 
 static void handle_removal_callback(void *context, IOReturn result,
                                     void *sender, IOHIDDeviceRef device) {
+    YubiKey *key = (__bridge YubiKey *)context;
+    if ([key isChangingState] || ![key isStateKnown] || [key state]) return;
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"lockWhenUnplugged"]) {
         NSLog(@"YubiKey removed, locking computer");
         NSAppleScript *lockScript =
@@ -270,17 +314,30 @@ static void match_set(CFMutableDictionaryRef dict, CFStringRef key, int value) {
 }
 
 - (void)registerKeyRemoval {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [self registerKeyRemovalWithVendorID:[defaults stringForKey:@"hotKeyVendorID"]
+                                productID:[defaults stringForKey:@"hotKeyProductID"]];
+}
+
+- (void)registerKeyRemovalWithVendorID:(NSString *)vendor
+                              productID:(NSString *)product {
 
     unsigned int idVendor = 0;
     unsigned int idProduct = 0;
 
-    NSString *value = [[NSUserDefaults standardUserDefaults] stringForKey:@"hotKeyVendorID"];
-    [[NSScanner scannerWithString:value] scanHexInt:&idVendor];
-
-    value = [[NSUserDefaults standardUserDefaults] stringForKey:@"hotKeyProductID"];
-    [[NSScanner scannerWithString:value] scanHexInt:&idProduct];
-
-    IOHIDManagerRef hidManager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+    if (!parseHexID(vendor, &idVendor) || !parseHexID(product, &idProduct)) return;
+    if (removalManager != NULL) {
+        IOHIDManagerUnscheduleFromRunLoop(removalManager, CFRunLoopGetMain(),
+                                          kCFRunLoopCommonModes);
+        IOHIDManagerClose(removalManager, kIOHIDOptionsTypeNone);
+        CFRelease(removalManager);
+    }
+    removalManager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+    if (removalManager == NULL) {
+        selectedVendorID = [vendor copy];
+        selectedProductID = [product copy];
+        return;
+    }
 
     CFMutableDictionaryRef match = CFDictionaryCreateMutable(kCFAllocatorDefault,
                                                              0,
@@ -291,11 +348,22 @@ static void match_set(CFMutableDictionaryRef dict, CFStringRef key, int value) {
     match_set(match, CFSTR(kIOHIDDeviceUsagePageKey), 1);
     match_set(match, CFSTR(kIOHIDDeviceUsageKey), 6);
 
-    IOHIDManagerScheduleWithRunLoop(hidManager, CFRunLoopGetMain(), kCFRunLoopCommonModes);
-    IOHIDManagerSetDeviceMatching(hidManager, match);
-    IOHIDManagerRegisterDeviceRemovalCallback(hidManager, handle_removal_callback, NULL);
+    IOHIDManagerScheduleWithRunLoop(removalManager, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+    IOHIDManagerSetDeviceMatching(removalManager, match);
+    IOHIDManagerRegisterDeviceRemovalCallback(removalManager, handle_removal_callback,
+                                               (__bridge void *)self);
 
     CFRelease(match);
+    IOReturn opened = IOHIDManagerOpen(removalManager, kIOHIDOptionsTypeNone);
+    if (opened != kIOReturnSuccess) {
+        NSLog(@"Could not open YubiKey removal matcher: 0x%x", opened);
+        IOHIDManagerUnscheduleFromRunLoop(removalManager, CFRunLoopGetMain(),
+                                          kCFRunLoopCommonModes);
+        CFRelease(removalManager);
+        removalManager = NULL;
+    }
+    selectedVendorID = [vendor copy];
+    selectedProductID = [product copy];
 }
 
 @end

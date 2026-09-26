@@ -21,6 +21,15 @@
 
 #import "PreferencesController.h"
 #import <ServiceManagement/ServiceManagement.h>
+#include <stdint.h>
+
+static BOOL validHexID(NSString *text) {
+  if (![text isKindOfClass:[NSString class]]) return NO;
+  unsigned int value = 0;
+  NSScanner *scanner = [NSScanner scannerWithString:text];
+  return [scanner scanHexInt:&value] && [scanner isAtEnd] &&
+         value > 0 && value <= UINT16_MAX;
+}
 
 @interface PreferencesController ()
 
@@ -64,24 +73,48 @@
 }
 
 - (IBAction)SetDefaultsButton:(id)sender {
-  NSString *domainName = [[NSBundle mainBundle] bundleIdentifier];
-  [[NSUserDefaults standardUserDefaults]
-      removePersistentDomainForName:domainName];
-  [self.hotkeyrecorder setObjectValue:nil];
   [controller revertToInitialValues:self];
-  [controller setValue:nil forKey:@"values.hotkey"];
+  [buttonOpenAtLogin setState:
+      [[[controller values] valueForKey:@"startAtLogin"] boolValue]];
 }
 
 - (IBAction)OKButton:(id)sender {
-  [controller save:self];
+  if (![[self window] makeFirstResponder:nil] || ![controller commitEditing]) return;
+  NSString *vendor = [[controller values] valueForKey:@"hotKeyVendorID"];
+  NSString *product = [[controller values] valueForKey:@"hotKeyProductID"];
+  if (!validHexID(vendor) || !validHexID(product)) {
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setAlertStyle:NSAlertStyleWarning];
+    [alert setMessageText:@"Invalid device filter"];
+    [alert setInformativeText:@"Enter hexadecimal Vendor and Product IDs."];
+    [alert runModal];
+    return;
+  }
+  NSMutableDictionary *devicePreferences = [@{
+    @"hotKeyVendorID": vendor,
+    @"hotKeyProductID": product
+  } mutableCopy];
   [[NSNotificationCenter defaultCenter]
       postNotificationName:@"changeDefaultsPrefs"
-                    object:self];
+                    object:devicePreferences];
+  if (![devicePreferences[@"applySucceeded"] boolValue]) {
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setAlertStyle:NSAlertStyleWarning];
+    [alert setMessageText:@"Could not apply device filter"];
+    [alert setInformativeText:@"The key state could not be confirmed. Check its connection and try again."];
+    [alert runModal];
+    return;
+  }
+  [controller save:self];
   bool state = [[buttonOpenAtLogin selectedCell] state];
-  if (state == YES) {
-    [self addAppAsLoginItem];
-  } else {
-    [self deleteAppFromLoginItem];
+  BOOL previousState = [[NSUserDefaults standardUserDefaults]
+                         boolForKey:@"startAtLogin"];
+  if (state != previousState) {
+    if (state) {
+      [self addAppAsLoginItem];
+    } else {
+      [self deleteAppFromLoginItem];
+    }
   }
   [[NSUserDefaults standardUserDefaults] setBool:state forKey:@"startAtLogin"];
   [[self window] close];

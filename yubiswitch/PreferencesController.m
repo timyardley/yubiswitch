@@ -51,6 +51,11 @@ static BOOL validHexID(NSString *text) {
   [controller setAppliesImmediately:FALSE];
   BOOL startAtLogin =
       [[NSUserDefaults standardUserDefaults] boolForKey:@"startAtLogin"];
+  if (@available(macOS 13.0, *)) {
+    SMAppServiceStatus status = [[SMAppService mainAppService] status];
+    startAtLogin = status == SMAppServiceStatusEnabled ||
+                   status == SMAppServiceStatusRequiresApproval;
+  }
   [buttonOpenAtLogin setState:startAtLogin];
   [self.hotkeyrecorder bind:NSValueBinding
                    toObject:controller
@@ -58,18 +63,28 @@ static BOOL validHexID(NSString *text) {
                     options:nil];
 }
 
-- (void)addAppAsLoginItem {
-  NSError *error = nil;
-  if (![[SMAppService mainAppService] registerAndReturnError:&error]) {
-    NSLog(@"Failed to register login item: %@", error);
+- (BOOL)addAppAsLoginItem {
+  if (@available(macOS 13.0, *)) {
+    NSError *error = nil;
+    if (![[SMAppService mainAppService] registerAndReturnError:&error]) {
+      NSLog(@"Failed to register login item: %@", error);
+      return NO;
+    }
+    return YES;
   }
+  return NO;
 }
 
-- (void)deleteAppFromLoginItem {
-  NSError *error = nil;
-  if (![[SMAppService mainAppService] unregisterAndReturnError:&error]) {
-    NSLog(@"Failed to unregister login item: %@", error);
+- (BOOL)deleteAppFromLoginItem {
+  if (@available(macOS 13.0, *)) {
+    NSError *error = nil;
+    if (![[SMAppService mainAppService] unregisterAndReturnError:&error]) {
+      NSLog(@"Failed to unregister login item: %@", error);
+      return NO;
+    }
+    return YES;
   }
+  return NO;
 }
 
 - (IBAction)SetDefaultsButton:(id)sender {
@@ -105,19 +120,51 @@ static BOOL validHexID(NSString *text) {
     [alert runModal];
     return;
   }
-  [controller save:self];
-  bool state = [[buttonOpenAtLogin selectedCell] state];
+  BOOL state = [[buttonOpenAtLogin selectedCell] state] == NSControlStateValueOn;
   BOOL previousState = [[NSUserDefaults standardUserDefaults]
                          boolForKey:@"startAtLogin"];
-  if (state != previousState) {
-    if (state) {
-      [self addAppAsLoginItem];
-    } else {
-      [self deleteAppFromLoginItem];
+  // The controller can also hold startAtLogin after Set Defaults. Keep its
+  // saved value aligned with the service until the service change succeeds.
+  [[controller values] setValue:@(previousState) forKey:@"startAtLogin"];
+  [controller save:self];
+  BOOL registered = previousState;
+  if (@available(macOS 13.0, *)) {
+    SMAppServiceStatus status = [[SMAppService mainAppService] status];
+    registered = status == SMAppServiceStatusEnabled ||
+                 status == SMAppServiceStatusRequiresApproval;
+  }
+  if (state != registered) {
+    BOOL changed = state ? [self addAppAsLoginItem] :
+                           [self deleteAppFromLoginItem];
+    if (!changed) {
+      NSAlert *alert = [[NSAlert alloc] init];
+      [alert setAlertStyle:NSAlertStyleWarning];
+      [alert setMessageText:@"Could not update Open at Login"];
+      if (@available(macOS 13.0, *)) {
+        [alert setInformativeText:@"The other preferences were saved. Try again to update the login item."];
+      } else {
+        [alert setInformativeText:@"Open at Login requires macOS 13 or later. The other preferences were saved."];
+      }
+      [alert runModal];
+      return;
     }
   }
   [[NSUserDefaults standardUserDefaults] setBool:state forKey:@"startAtLogin"];
+  [[controller values] setValue:@(state) forKey:@"startAtLogin"];
+  [controller save:self];
   [[self window] close];
+  if (state) {
+    if (@available(macOS 13.0, *)) {
+      if ([[SMAppService mainAppService] status] ==
+          SMAppServiceStatusRequiresApproval) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        [alert setAlertStyle:NSAlertStyleInformational];
+        [alert setMessageText:@"Approve Open at Login"];
+        [alert setInformativeText:@"macOS needs your approval in Login Items before YubiSwitch can open at login."];
+        [alert runModal];
+      }
+    }
+  }
 }
 
 - (IBAction)CancelButton:(id)sender {

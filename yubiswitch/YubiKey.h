@@ -36,6 +36,7 @@
     BOOL suspend;
     BOOL stateKnown;
     BOOL changingState;
+    BOOL lockOnRemoval;
     NSString *selectedVendorID;
     NSString *selectedProductID;
     IOHIDManagerRef removalManager;

@@ -189,7 +189,7 @@
 - (void)reDisableYK {
     BOOL res;
     res = [yk disable];
-    if (res == TRUE) {
+    if (res == TRUE && [yk isStateKnown]) {
         displayedStateKnown = true;
         [statusItem.button setTitle:@""];
         [statusItem.button setToolTip:(@"YubiKey disabled")];
@@ -209,7 +209,7 @@
     } else {
         res = [yk disable];
     }
-    if (res == TRUE) {
+    if (res == TRUE && [yk isStateKnown]) {
         displayedStateKnown = true;
         [statusItem.button setTitle:@""];
         [reDisableTimer invalidate];

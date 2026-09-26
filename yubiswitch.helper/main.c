@@ -26,6 +26,7 @@
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/usb/IOUSBLib.h>
 #include <IOKit/usb/USBSpec.h>
+#include <IOKit/usb/IOUSBHostFamilyDefinitions.h>
 #include <IOKit/hid/IOHIDManager.h>
 #include <IOKit/hid/IOHIDKeys.h>
 #include <IOKit/hid/IOHIDDevice.h>
@@ -33,22 +34,15 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <unistd.h>
 #import <ServiceManagement/ServiceManagement.h>
 #import <Security/Authorization.h>
+#include "usb_policy.h"
 
 
 IOHIDManagerRef hidManager;
 IOHIDDeviceRef hidDevice;
-typedef struct {
-    int vendorID;
-    int productID;
-    uint64_t registryID;
-    uint32_t locationID;
-    UInt8 configuration;
-    Boolean valid;
-} USBDeviceState;
-
-static USBDeviceState usbState;
+static USBPolicy usbPolicy;
 static Boolean desiredDisabled;
 static int selectedVendorID;
 static int selectedProductID;
@@ -80,44 +74,6 @@ static int64_t usb_property_number(io_service_t service, CFStringRef key) {
     return number;
 }
 
-// Keep the USB service identity so a restore cannot target another key with
-// the same product ID. Location survives a USB service re-enumeration.
-static io_service_t usb_service_find(int vendorID, int productID,
-                                      const USBDeviceState *state) {
-    CFMutableDictionaryRef matchDict = IOServiceMatching("IOUSBHostDevice");
-    if (!matchDict) return 0;
-
-    CFNumberRef vidRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &vendorID);
-    CFNumberRef pidRef = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &productID);
-    CFDictionarySetValue(matchDict, CFSTR("idVendor"), vidRef);
-    CFDictionarySetValue(matchDict, CFSTR("idProduct"), pidRef);
-    CFRelease(vidRef);
-    CFRelease(pidRef);
-
-    io_iterator_t iterator = 0;
-    if (IOServiceGetMatchingServices(kIOMainPortDefault, matchDict,
-                                     &iterator) != KERN_SUCCESS) return 0;
-    io_service_t service;
-    while ((service = IOIteratorNext(iterator)) != 0) {
-        if (state == NULL ||
-            (state->locationID != 0 &&
-             (uint32_t)usb_property_number(service,
-                   CFSTR(kUSBDevicePropertyLocationID)) == state->locationID)) {
-            IOObjectRelease(iterator);
-            return service;
-        }
-        uint64_t registryID = 0;
-        IORegistryEntryGetRegistryEntryID(service, &registryID);
-        if (registryID == state->registryID) {
-            IOObjectRelease(iterator);
-            return service;
-        }
-        IOObjectRelease(service);
-    }
-    IOObjectRelease(iterator);
-    return 0;
-}
-
 static IOUSBDeviceInterface182 **usb_interface_create(io_service_t service) {
     IOCFPlugInInterface **plugIn = NULL;
     SInt32 score = 0;
@@ -146,129 +102,216 @@ static IOReturn usb_interface_open(IOUSBDeviceInterface182 **dev) {
     return result;
 }
 
-static Boolean usb_device_configured(int vendorID, int productID) {
-    io_service_t service = usb_service_find(vendorID, productID, NULL);
-    if (service == 0) return true; // A disconnected key cannot remain in use.
-    IOUSBDeviceInterface182 **dev = usb_interface_create(service);
-    IOObjectRelease(service);
-    if (dev == NULL) return false;
-    UInt8 configuration = 0;
-    IOReturn result = (*dev)->GetConfiguration(dev, &configuration);
-    (*dev)->Release(dev);
-    return result == kIOReturnSuccess && configuration != 0;
+static bool usb_list_devices(void *context, int vendorID, int productID,
+                             USBPolicyDevice **devices, size_t *count) {
+    (void)context;
+    *devices = NULL;
+    *count = 0;
+    CFMutableDictionaryRef match = IOServiceMatching("IOUSBHostDevice");
+    if (match == NULL) return false;
+    match_set(match, CFSTR("idVendor"), vendorID);
+    match_set(match, CFSTR("idProduct"), productID);
+    io_iterator_t iterator = 0;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, match,
+                                     &iterator) != KERN_SUCCESS) return false;
+    io_service_t service;
+    while ((service = IOIteratorNext(iterator)) != 0) {
+        USBPolicyDevice *grown = realloc(*devices,
+                                         (*count + 1) * sizeof(**devices));
+        if (grown == NULL) {
+            IOObjectRelease(service);
+            for (size_t i = 0; i < *count; i++) {
+                IOObjectRelease((io_service_t)(uintptr_t)(*devices)[i].handle);
+            }
+            free(*devices);
+            *devices = NULL;
+            *count = 0;
+            IOObjectRelease(iterator);
+            return false;
+        }
+        *devices = grown;
+        uint64_t registryID = 0;
+        IORegistryEntryGetRegistryEntryID(service, &registryID);
+        (*devices)[(*count)++] = (USBPolicyDevice){
+            vendorID, productID, registryID,
+            (uint32_t)usb_property_number(service,
+                                          CFSTR(kUSBDevicePropertyLocationID)),
+            (void *)(uintptr_t)service
+        };
+    }
+    IOObjectRelease(iterator);
+    return true;
 }
 
-// Keep savedConfiguration until the requested configuration is confirmed.
-// ResetDevice is deliberately avoided: it can re-enumerate the device while
-// the helper still believes it is suspended.
-static Boolean usb_device_enable(void) {
-    if (!usbState.valid) return usb_device_configured(selectedVendorID,
-                                                       selectedProductID);
-    io_service_t service = usb_service_find(usbState.vendorID,
-                                             usbState.productID, &usbState);
-    if (service == 0) {
-        ylog("USB device unavailable for restore");
+static void usb_release_devices(void *context, USBPolicyDevice *devices,
+                                size_t count) {
+    (void)context;
+    for (size_t i = 0; i < count; i++) {
+        IOObjectRelease((io_service_t)(uintptr_t)devices[i].handle);
+    }
+    free(devices);
+}
+
+static bool usb_get_configuration(void *context,
+                                  const USBPolicyDevice *device,
+                                  unsigned char *configuration) {
+    (void)context;
+    IOUSBDeviceInterface182 **dev = usb_interface_create(
+        (io_service_t)(uintptr_t)device->handle);
+    if (dev == NULL) return false;
+    UInt8 value = 0;
+    IOReturn result = (*dev)->GetConfiguration(dev, &value);
+    (*dev)->Release(dev);
+    if (result != kIOReturnSuccess) {
+        ylog("Could not read USB configuration: 0x%x", result);
         return false;
     }
-    IOUSBDeviceInterface182 **dev = usb_interface_create(service);
-    IOObjectRelease(service);
+    *configuration = value;
+    return true;
+}
+
+static bool usb_set_configuration(void *context,
+                                  const USBPolicyDevice *device,
+                                  unsigned char configuration) {
+    (void)context;
+    IOUSBDeviceInterface182 **dev = usb_interface_create(
+        (io_service_t)(uintptr_t)device->handle);
     if (dev == NULL) return false;
     IOReturn result = usb_interface_open(dev);
-    if (result != kIOReturnSuccess) {
-        ylog("Could not open USB device for restore: 0x%x", result);
-        (*dev)->Release(dev);
-        return false;
+    if (result == kIOReturnSuccess) {
+        result = (*dev)->SetConfiguration(dev, configuration);
+        (*dev)->USBDeviceClose(dev);
     }
-    IOReturn resumed = (*dev)->USBDeviceSuspend(dev, false);
+    (*dev)->Release(dev);
+    if (result != kIOReturnSuccess) {
+        ylog("Could not set USB configuration %u: 0x%x",
+             configuration, result);
+    }
+    return result == kIOReturnSuccess;
+}
+
+static bool usb_set_suspended(void *context, const USBPolicyDevice *device,
+                              bool suspended) {
+    (void)context;
+    IOUSBDeviceInterface182 **dev = usb_interface_create(
+        (io_service_t)(uintptr_t)device->handle);
+    if (dev == NULL) return false;
+    IOReturn result = usb_interface_open(dev);
+    if (result == kIOReturnSuccess) {
+        result = (*dev)->USBDeviceSuspend(dev, suspended);
+        (*dev)->USBDeviceClose(dev);
+    }
+    (*dev)->Release(dev);
+    if (result != kIOReturnSuccess) {
+        ylog("USB %s failed: 0x%x", suspended ? "suspend" : "resume", result);
+    }
+    return result == kIOReturnSuccess;
+}
+
+static unsigned usb_interface_count(io_registry_entry_t parent, unsigned depth) {
+    io_iterator_t iterator = 0;
+    if (IORegistryEntryGetChildIterator(parent, kIOServicePlane,
+                                         &iterator) != KERN_SUCCESS) return 0;
+    unsigned count = 0;
+    io_registry_entry_t child;
+    while ((child = IOIteratorNext(iterator)) != 0) {
+        if (IOObjectConformsTo(child, kIOUSBHostInterfaceClassName) ||
+            IOObjectConformsTo(child, "IOUSBInterface")) {
+            count++;
+        } else if (depth < 3) {
+            count += usb_interface_count(child, depth + 1);
+        }
+        IOObjectRelease(child);
+    }
+    IOObjectRelease(iterator);
+    return count;
+}
+
+static unsigned usb_expected_interface_count(const USBPolicyDevice *device) {
+    IOUSBDeviceInterface182 **dev = usb_interface_create(
+        (io_service_t)(uintptr_t)device->handle);
+    if (dev == NULL) return 0;
     UInt8 configuration = 0;
-    result = (*dev)->GetConfiguration(dev, &configuration);
-    if (result == kIOReturnSuccess && configuration == usbState.configuration &&
-        resumed == kIOReturnSuccess) {
-        usbState.valid = false;
-    } else {
-        result = (*dev)->SetConfiguration(dev, usbState.configuration);
-        if (result == kIOReturnSuccess && resumed == kIOReturnSuccess) {
-            UInt8 verified = 0;
-            result = (*dev)->GetConfiguration(dev, &verified);
-            if (result == kIOReturnSuccess && verified == usbState.configuration) {
-                usbState.valid = false;
+    UInt8 configurations = 0;
+    unsigned expected = 0;
+    if ((*dev)->GetConfiguration(dev, &configuration) == kIOReturnSuccess &&
+        configuration != 0 &&
+        (*dev)->GetNumberOfConfigurations(dev, &configurations) ==
+            kIOReturnSuccess) {
+        for (UInt8 index = 0; index < configurations; index++) {
+            IOUSBConfigurationDescriptorPtr descriptor = NULL;
+            if ((*dev)->GetConfigurationDescriptorPtr(dev, index,
+                                                        &descriptor) ==
+                    kIOReturnSuccess && descriptor != NULL &&
+                descriptor->bConfigurationValue == configuration) {
+                expected = descriptor->bNumInterfaces;
+                break;
             }
         }
     }
-    (*dev)->USBDeviceClose(dev);
     (*dev)->Release(dev);
-    if (usbState.valid) ylog("USB device restore not confirmed: 0x%x", result);
-    return !usbState.valid;
+    return expected;
+}
+
+static bool usb_is_ready(void *context, const USBPolicyDevice *device) {
+    (void)context;
+    unsigned expected = usb_expected_interface_count(device);
+    if (expected == 0) {
+        ylog("Could not determine expected USB interfaces");
+        return false;
+    }
+    io_service_t service = (io_service_t)(uintptr_t)device->handle;
+    mach_timespec_t quietTime = {2, 0};
+    IOReturn quiet = IOServiceWaitQuiet(service, &quietTime);
+    if (quiet != kIOReturnSuccess) {
+        ylog("USB interface enumeration did not settle: 0x%x", quiet);
+        return false;
+    }
+    for (unsigned attempt = 0; attempt < 10; attempt++) {
+        if (usb_interface_count(service, 0) >= expected) return true;
+        usleep(100000);
+    }
+    ylog("USB device interfaces did not enumerate after restore");
+    return false;
+}
+
+static void usb_disable_remote_wake(void *context,
+                                    const USBPolicyDevice *device) {
+    (void)context;
+    IOReturn result = IORegistryEntrySetCFProperty(
+        (io_service_t)(uintptr_t)device->handle,
+        CFSTR("kUSBHostDevicePropertyRemoteWakeOverride"), kCFBooleanFalse);
+    if (result != kIOReturnSuccess) {
+        ylog("Could not set remote wake override: 0x%x", result);
+    }
+}
+
+static const USBPolicyOps usbOps = {
+    NULL, usb_list_devices, usb_release_devices, usb_get_configuration,
+    usb_set_configuration, usb_set_suspended, usb_is_ready,
+    usb_disable_remote_wake
+};
+
+static Boolean usb_device_enable(void) {
+    bool allRestored = usb_policy_restore_all(&usbPolicy, &usbOps);
+    bool selectedReady = selectedVendorID == 0 ||
+        usb_policy_restore(&usbPolicy, &usbOps,
+                           selectedVendorID, selectedProductID);
+    return allRestored && selectedReady;
+}
+
+static bool selected_device_present(bool *present) {
+    USBPolicyDevice *devices = NULL;
+    size_t count = 0;
+    if (!usb_list_devices(NULL, selectedVendorID, selectedProductID,
+                          &devices, &count)) return false;
+    *present = count != 0;
+    usb_release_devices(NULL, devices, count);
+    return true;
 }
 
 static Boolean usb_device_disable(int vendorID, int productID) {
-    io_service_t service = usb_service_find(vendorID, productID,
-        (usbState.valid && usbState.vendorID == vendorID &&
-         usbState.productID == productID) ? &usbState : NULL);
-    if (service == 0) {
-        ylog("USB device unavailable for disable");
-        return false;
-    }
-    uint64_t registryID = 0;
-    IORegistryEntryGetRegistryEntryID(service, &registryID);
-    uint32_t locationID = (uint32_t)usb_property_number(service,
-        CFSTR(kUSBDevicePropertyLocationID));
-    IOUSBDeviceInterface182 **dev = usb_interface_create(service);
-    if (dev == NULL) {
-        IOObjectRelease(service);
-        return false;
-    }
-    if (usbState.valid && usbState.vendorID == vendorID &&
-        usbState.productID == productID) {
-        UInt8 currentConfiguration = 0;
-        IOReturn currentResult = (*dev)->GetConfiguration(dev,
-                                                           &currentConfiguration);
-        if (currentResult == kIOReturnSuccess && currentConfiguration == 0) {
-            (*dev)->Release(dev);
-            IOObjectRelease(service);
-            return true;
-        }
-    }
-    IOReturn result = usb_interface_open(dev);
-    if (result != kIOReturnSuccess) {
-        ylog("Could not open USB device for disable: 0x%x", result);
-        (*dev)->Release(dev);
-        IOObjectRelease(service);
-        return false;
-    }
-    UInt8 configuration = 0;
-    result = (*dev)->GetConfiguration(dev, &configuration);
-    Boolean success = false;
-    if (result != kIOReturnSuccess) {
-        ylog("Could not read USB configuration: 0x%x", result);
-    } else if (configuration == 0) {
-        // An unconfigured device without our saved state cannot be restored.
-        success = usbState.valid;
-    } else {
-        result = (*dev)->SetConfiguration(dev, 0);
-        if (result == kIOReturnSuccess) {
-            usbState = (USBDeviceState){vendorID, productID, registryID,
-                                        locationID, configuration, true};
-            IOReturn suspended = (*dev)->USBDeviceSuspend(dev, true);
-            if (suspended != kIOReturnSuccess) {
-                ylog("USB suspend failed after deconfiguration: 0x%x", suspended);
-            }
-            success = true;
-        } else {
-            ylog("Could not deconfigure USB device: 0x%x", result);
-        }
-    }
-    (*dev)->USBDeviceClose(dev);
-    (*dev)->Release(dev);
-    if (success) {
-        IOReturn wakeResult = IORegistryEntrySetCFProperty(service,
-            CFSTR("kUSBHostDevicePropertyRemoteWakeOverride"), kCFBooleanFalse);
-        if (wakeResult != kIOReturnSuccess) {
-            ylog("Could not set remote wake override: 0x%x", wakeResult);
-        }
-    }
-    IOObjectRelease(service);
-    return success;
+    return usb_policy_disable(&usbPolicy, &usbOps, vendorID, productID);
 }
 
 static void handle_removal_callback(void *context, IOReturn result,
@@ -354,12 +397,38 @@ static Boolean configure_hid_manager(int vendorID, int productID) {
     return true;
 }
 
+static bool policy_configure_hid(void *context, int vendorID, int productID) {
+    (void)context;
+    return configure_hid_manager(vendorID, productID);
+}
+
+static void policy_close_hid(void *context) {
+    (void)context;
+    close_hid_manager();
+}
+
+static const USBPolicyHIDOps hidOps = {
+    NULL, policy_configure_hid, policy_close_hid
+};
+
 static void schedule_usb_reconcile(unsigned attempts, uint64_t generation) {
     if (attempts == 0) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
-        if (!desiredDisabled || generation != requestGeneration) return;
-        if (!usb_device_disable(selectedVendorID, selectedProductID)) {
+        if (generation != requestGeneration) return;
+        bool success;
+        if (desiredDisabled) {
+            bool restoredOthers = usb_policy_restore_except(
+                &usbPolicy, &usbOps, selectedVendorID, selectedProductID);
+            bool hidReady = configure_hid_manager(selectedVendorID,
+                                                  selectedProductID);
+            bool usbReady = hidReady && usb_device_disable(
+                selectedVendorID, selectedProductID);
+            success = restoredOthers && hidReady && usbReady;
+        } else {
+            success = usb_device_enable();
+        }
+        if (!success) {
             schedule_usb_reconcile(attempts - 1, generation);
         }
     });
@@ -368,7 +437,9 @@ static void schedule_usb_reconcile(unsigned attempts, uint64_t generation) {
 static void usb_matched_callback(void *context, io_iterator_t iterator) {
     io_service_t service;
     while ((service = IOIteratorNext(iterator)) != 0) IOObjectRelease(service);
-    if (desiredDisabled) schedule_usb_reconcile(8, requestGeneration);
+    if (desiredDisabled || usb_policy_has_pending(&usbPolicy)) {
+        schedule_usb_reconcile(8, requestGeneration);
+    }
 }
 
 static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
@@ -389,62 +460,50 @@ static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
                     vendor > 0 && vendor <= UINT16_MAX &&
                     product > 0 && product <= UINT16_MAX;
     Boolean success = false;
+    bool selectedPresent = true;
     if (valid && action == 1) {
         requestGeneration++;
-        success = usbState.valid ? usb_device_enable() :
-            usb_device_configured((int)vendor, (int)product);
-        if (success) {
-            desiredDisabled = false;
-            close_hid_manager();
-        } else if (desiredDisabled) {
-            if (!usb_device_disable(selectedVendorID, selectedProductID)) {
-                ylog("Could not reapply disabled state after failed enable");
-            }
-            schedule_usb_reconcile(8, requestGeneration);
+        selectedVendorID = (int)vendor;
+        selectedProductID = (int)product;
+        desiredDisabled = false;
+        close_hid_manager();
+        success = usb_device_enable();
+        if (success && !selected_device_present(&selectedPresent)) {
+            success = false;
         }
+        if (!success) schedule_usb_reconcile(8, requestGeneration);
     } else if (valid) {
         int oldVendor = selectedVendorID;
         int oldProduct = selectedProductID;
         Boolean filterChanged = desiredDisabled &&
             (oldVendor != vendor || oldProduct != product);
         if (filterChanged) {
-            success = usb_device_enable();
-            if (success) close_hid_manager();
+            success = usb_policy_change_filter(
+                &usbPolicy, &usbOps, &hidOps, oldVendor, oldProduct,
+                (int)vendor, (int)product);
+            if (success) {
+                selectedVendorID = (int)vendor;
+                selectedProductID = (int)product;
+            }
         } else {
-            success = true;
-        }
-        if (success) {
             selectedVendorID = (int)vendor;
             selectedProductID = (int)product;
             desiredDisabled = true;
-            requestGeneration++;
+            Boolean restoredOthers = usb_policy_restore_except(
+                &usbPolicy, &usbOps, selectedVendorID, selectedProductID);
             Boolean hidReady = configure_hid_manager(selectedVendorID,
                                                       selectedProductID);
-            Boolean usbReady = usb_device_disable(selectedVendorID,
-                                                   selectedProductID);
-            success = hidReady && usbReady;
-            if (!success && filterChanged) {
-                // Keep the prior key disabled if the new filter fails.
-                close_hid_manager();
-                selectedVendorID = oldVendor;
-                selectedProductID = oldProduct;
-                requestGeneration++;
-                Boolean oldHidReady = configure_hid_manager(oldVendor,
-                                                              oldProduct);
-                Boolean oldUsbReady = usb_device_disable(oldVendor,
-                                                           oldProduct);
-                if (!oldHidReady || !oldUsbReady) {
-                    ylog("Could not reapply previous disabled filter");
-                }
-            }
-            if (!usbReady || !success) {
-                schedule_usb_reconcile(8, requestGeneration);
-            }
+            Boolean usbReady = hidReady && usb_device_disable(
+                selectedVendorID, selectedProductID);
+            success = restoredOthers && hidReady && usbReady;
         }
+        requestGeneration++;
+        if (!success) schedule_usb_reconcile(8, requestGeneration);
     }
     xpc_object_t reply = xpc_dictionary_create_reply(event);
     if (reply != NULL) {
-        xpc_dictionary_set_string(reply, "reply", success ? "OK" : "ERROR");
+        xpc_dictionary_set_string(reply, "reply", !success ? "ERROR" :
+                                  !selectedPresent ? "ABSENT" : "OK");
         xpc_connection_t remote = xpc_dictionary_get_remote_connection(event);
         xpc_connection_send_message(remote, reply);
         xpc_release(reply);
@@ -469,7 +528,9 @@ static void powerCallback(void *refCon, io_service_t service,
             IOAllowPowerChange(pmRootPort, (long)messageArgument);
             break;
         case kIOMessageSystemHasPoweredOn:
-            if (desiredDisabled) schedule_usb_reconcile(8, requestGeneration);
+            if (desiredDisabled || usb_policy_has_pending(&usbPolicy)) {
+                schedule_usb_reconcile(8, requestGeneration);
+            }
             break;
         default:
             break;
@@ -484,14 +545,14 @@ int main(int argc, const char *argv[]) {
     dispatch_source_t interrupt = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL,
                                                           SIGINT, 0, dispatch_get_main_queue());
     dispatch_source_set_event_handler(term, ^{
-        Boolean restored = usb_device_enable();
         close_hid_manager();
+        Boolean restored = usb_device_enable();
         if (!restored) ylog("Helper exited before USB restore completed");
         exit(restored ? EXIT_SUCCESS : EXIT_FAILURE);
     });
     dispatch_source_set_event_handler(interrupt, ^{
-        Boolean restored = usb_device_enable();
         close_hid_manager();
+        Boolean restored = usb_device_enable();
         if (!restored) ylog("Helper exited before USB restore completed");
         exit(restored ? EXIT_SUCCESS : EXIT_FAILURE);
     });

@@ -15,10 +15,12 @@
     BOOL lockStateFromNotification;
     BOOL hasUnlockedSessionObservation;
     NSTimeInterval unlockedSessionObservedAt;
+    NSTimer *automaticRetryTimer;
 }
 
 - (id)initWithYubiKey:(YubiKey *)yubikey;
 - (BOOL)isScreenLocked;
 - (BOOL)allowsAutomaticDisable;
+- (void)scheduleAutomaticRetry;
 
 @end

@@ -15,6 +15,8 @@
               sessionDictionary:(NSDictionary *)sessionDictionary;
 - (BOOL)allowsAutomaticDisableWithSessionDictionary:(NSDictionary *)sessionDictionary
                                           atUptime:(NSTimeInterval)uptime;
+- (void)retryAutomaticAction:(NSTimer *)timer;
+- (void)retryAutomaticActionWithSessionDictionary:(NSDictionary *)sessionDictionary;
 @end
 
 @implementation ComputerStateMonitor
@@ -53,6 +55,8 @@
     }
     lockStateFromNotification = YES;
     hasUnlockedSessionObservation = NO;
+    [automaticRetryTimer invalidate];
+    automaticRetryTimer = nil;
     BOOL activated =
         [[NSUserDefaults standardUserDefaults] boolForKey:@"disableAtLockSleep"];
 
@@ -64,12 +68,38 @@
 
     if ([[notification name]  isEqual:@"com.apple.screenIsLocked"]) {
         NSLog(@"Screen is locked, renabling yubikey");
-        [yk enable];
+        if (![yk enable]) [self scheduleAutomaticRetry];
     }
 
     if ([[notification name]  isEqual:@"com.apple.screenIsUnlocked"]) {
         NSLog(@"Screen is unlocked, disabling yubikey");
-        [yk disable];
+        if (![yk disable]) [self scheduleAutomaticRetry];
+    }
+}
+
+- (void)scheduleAutomaticRetry {
+    if (automaticRetryTimer != nil) return;
+    automaticRetryTimer = [NSTimer timerWithTimeInterval:5
+                                                 target:self
+                                               selector:@selector(retryAutomaticAction:)
+                                               userInfo:nil
+                                                repeats:NO];
+    [[NSRunLoop mainRunLoop] addTimer:automaticRetryTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)retryAutomaticAction:(NSTimer *)timer {
+    NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
+    [self retryAutomaticActionWithSessionDictionary:session];
+}
+
+- (void)retryAutomaticActionWithSessionDictionary:(NSDictionary *)sessionDictionary {
+    [automaticRetryTimer invalidate];
+    automaticRetryTimer = nil;
+    BOOL shouldDisable = [self allowsAutomaticDisableWithSessionDictionary:sessionDictionary];
+    BOOL succeeded = shouldDisable ? [yk disable] : [yk enable];
+    if (!succeeded || (!shouldDisable && screenLocked &&
+                       hasUnlockedSessionObservation)) {
+        [self scheduleAutomaticRetry];
     }
 }
 
@@ -110,6 +140,11 @@
         screenLocked = NO;
     }
     return YES;
+}
+
+- (void)dealloc {
+    [automaticRetryTimer invalidate];
+    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self];
 }
 
 @end

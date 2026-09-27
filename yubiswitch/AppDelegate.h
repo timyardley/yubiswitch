@@ -54,7 +54,7 @@
 -(void)enableYubiKey:(BOOL)enable;
 -(void)notify:(NSString *)msg;
 -(void)reDisableYK;
--(NSTimer*)createTimer:(NSInteger)interval;
+-(NSTimer*)createTimer:(NSTimeInterval)interval;
 -(void)lockComputer;
 -(bool)application:(NSApplication *)sender delegateHandlesKey:(NSString *)key;
 -(bool)status;

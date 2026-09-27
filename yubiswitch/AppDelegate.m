@@ -25,6 +25,8 @@
 
 @interface AppDelegate ()
 - (BOOL)applyInitialKeyPolicy;
+- (void)refreshReDisableTimer;
+- (void)showInvalidDelayAlert;
 @end
 
 // This is the main class, responsible for the status bar icon and general
@@ -110,7 +112,9 @@
 }
 
 - (BOOL)applyInitialKeyPolicy {
-    return [state_monitor allowsAutomaticDisable] ? [yk disable] : [yk enable];
+    BOOL applied = [state_monitor allowsAutomaticDisable] ? [yk disable] : [yk enable];
+    if (!applied) [state_monitor scheduleAutomaticRetry];
+    return applied;
 }
 
 - (void)awakeFromNib {
@@ -130,6 +134,10 @@
                forKeyPath:keyPath
                   options:NSKeyValueObservingOptionInitial
                   context:NULL];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(switchOffDelayDidChange:)
+                                                 name:@"switchOffDelayChanged"
+                                               object:nil];
 
     SRShortcutAction *hotkeyAction =
     [SRShortcutAction shortcutActionWithKeyPath:keyPath
@@ -186,7 +194,7 @@
 }
 
 // TODO: create enable/disable methods and use them in toggle: and createTimer:
-- (NSTimer *)createTimer:(NSInteger)interval {
+- (NSTimer *)createTimer:(NSTimeInterval)interval {
     return [NSTimer scheduledTimerWithTimeInterval:interval
                                             target:self
                                           selector:@selector(reDisableYK)
@@ -196,6 +204,9 @@
 
 - (void)reDisableYK {
     reDisableTimer = nil;
+    NSDictionary *delay = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"switchOffDelay"];
+    if (![[delay valueForKey:@"enabled"] boolValue] ||
+        [PreferencesController validatedSwitchOffInterval:[delay valueForKey:@"interval"]] == 0) return;
     if ([yk isStateKnown] && [yk state]) return;
     if (![state_monitor allowsAutomaticDisable]) {
         reDisableTimer = [self createTimer:5];
@@ -235,16 +246,7 @@
             isEnabled = true;
             [[statusMenu itemAtIndex:0] setState:1];
             [self notify:@"YubiKey enabled"];
-            NSDictionary *switchOffDelayPrefs = [[NSUserDefaults standardUserDefaults]
-                                                 dictionaryForKey:@"switchOffDelay"];
-            bool enabled = [[switchOffDelayPrefs valueForKey:@"enabled"] boolValue];
-            if (enabled == TRUE) {
-                NSNumberFormatter *f = [[NSNumberFormatter alloc] init];
-                [f setNumberStyle:NSNumberFormatterDecimalStyle];
-                NSNumber *interval =
-                [f numberFromString:[switchOffDelayPrefs valueForKey:@"interval"]];
-                reDisableTimer = [self createTimer:(long)[interval integerValue]];
-            }
+            [self refreshReDisableTimer];
         } else {
             [statusItem.button setToolTip:(@"YubiKey disabled")];
             [statusItem.button setImage:[NSImage imageNamed:@"YubikeyDisabled"]];
@@ -288,7 +290,42 @@
 }
 
 - (IBAction)toggleSwitchOffDelay:(id)sender {
+    NSDictionary *delay = [[controller values] valueForKey:@"switchOffDelay"];
+    if ([[delay valueForKey:@"enabled"] boolValue] &&
+        [PreferencesController validatedSwitchOffInterval:[delay valueForKey:@"interval"]] == 0) {
+        NSMutableDictionary *reverted = [delay mutableCopy];
+        reverted[@"enabled"] = @NO;
+        [[controller values] setValue:reverted forKey:@"switchOffDelay"];
+        [controller save:self];
+        [self refreshReDisableTimer];
+        [self showInvalidDelayAlert];
+        return;
+    }
     [controller save:self];
+    [self refreshReDisableTimer];
+}
+
+- (void)showInvalidDelayAlert {
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setAlertStyle:NSAlertStyleWarning];
+    [alert setMessageText:@"Invalid switch-off delay"];
+    [alert setInformativeText:@"Set a positive number of seconds in Preferences before enabling automatic switch-off."];
+    [alert runModal];
+}
+
+- (void)switchOffDelayDidChange:(NSNotification *)notification {
+    [self refreshReDisableTimer];
+}
+
+- (void)refreshReDisableTimer {
+    [reDisableTimer invalidate];
+    reDisableTimer = nil;
+    if (yk == nil || ([yk isStateKnown] && [yk state])) return;
+    NSDictionary *delay = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"switchOffDelay"];
+    if (![[delay valueForKey:@"enabled"] boolValue]) return;
+    NSTimeInterval interval = [PreferencesController validatedSwitchOffInterval:
+                               [delay valueForKey:@"interval"]];
+    if (interval > 0) reDisableTimer = [self createTimer:interval];
 }
 
 - (IBAction)toggleLockWhenUnplugged:(id)sender {

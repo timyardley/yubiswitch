@@ -22,6 +22,7 @@
 #import "PreferencesController.h"
 #import <ServiceManagement/ServiceManagement.h>
 #include <stdint.h>
+#include <math.h>
 
 static BOOL validHexID(NSString *text) {
   if (![text isKindOfClass:[NSString class]]) return NO;
@@ -37,6 +38,28 @@ static BOOL validHexID(NSString *text) {
 
 @implementation PreferencesController {
   SRShortcutValidator *_validator;
+}
+
++ (NSTimeInterval)validatedSwitchOffInterval:(id)value {
+  double seconds = 0;
+  if ([value isKindOfClass:[NSNumber class]]) {
+    seconds = [value doubleValue];
+  } else if ([value isKindOfClass:[NSString class]]) {
+    BOOL parsed = NO;
+    for (NSLocale *locale in @[[NSLocale currentLocale],
+                              [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]]) {
+      NSScanner *scanner = [NSScanner scannerWithString:value];
+      scanner.locale = locale;
+      if ([scanner scanDouble:&seconds] && [scanner isAtEnd]) {
+        parsed = YES;
+        break;
+      }
+    }
+    if (!parsed) return 0;
+  } else {
+    return 0;
+  }
+  return isfinite(seconds) && seconds > 0 ? seconds : 0;
 }
 
 - (void)awakeFromNib {
@@ -95,6 +118,16 @@ static BOOL validHexID(NSString *text) {
 
 - (IBAction)OKButton:(id)sender {
   if (![[self window] makeFirstResponder:nil] || ![controller commitEditing]) return;
+  NSDictionary *delay = [[controller values] valueForKey:@"switchOffDelay"];
+  if ([[delay valueForKey:@"enabled"] boolValue] &&
+      [[self class] validatedSwitchOffInterval:[delay valueForKey:@"interval"]] == 0) {
+    NSAlert *alert = [[NSAlert alloc] init];
+    [alert setAlertStyle:NSAlertStyleWarning];
+    [alert setMessageText:@"Invalid switch-off delay"];
+    [alert setInformativeText:@"Enter a number of seconds greater than zero."];
+    [alert runModal];
+    return;
+  }
   NSString *vendor = [[controller values] valueForKey:@"hotKeyVendorID"];
   NSString *product = [[controller values] valueForKey:@"hotKeyProductID"];
   if (!validHexID(vendor) || !validHexID(product)) {
@@ -126,7 +159,15 @@ static BOOL validHexID(NSString *text) {
   // The controller can also hold startAtLogin after Set Defaults. Keep its
   // saved value aligned with the service until the service change succeeds.
   [[controller values] setValue:@(previousState) forKey:@"startAtLogin"];
+  NSDictionary *previousDelay = [[NSUserDefaults standardUserDefaults]
+      dictionaryForKey:@"switchOffDelay"];
   [controller save:self];
+  NSDictionary *savedDelay = [[NSUserDefaults standardUserDefaults]
+      dictionaryForKey:@"switchOffDelay"];
+  if (![previousDelay isEqualToDictionary:savedDelay]) {
+    [[NSNotificationCenter defaultCenter]
+        postNotificationName:@"switchOffDelayChanged" object:nil];
+  }
   BOOL registered = previousState;
   if (@available(macOS 13.0, *)) {
     SMAppServiceStatus status = [[SMAppService mainAppService] status];

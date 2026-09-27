@@ -116,6 +116,7 @@ Preference window:
 - An enabled indication confirms that a matching key is attached and its selected USB configuration and interfaces have returned. If the key is disconnected, its status remains unknown even though the helper has cleared the disabled policy. Interface enumeration does not prove that an OTP, FIDO, or smart-card authentication succeeds. Test the function you use after installing a properly signed build.
 - The Vendor ID and Product ID filter applies to every matching attached device. YubiSwitch keeps separate restore information for matching devices at different USB locations.
 - If the app exits unexpectedly, the helper attempts to restore the key when its controlling XPC connection closes. Confirm this recovery on a signed build before relying on it.
+- With `disableAtLockSleep` enabled, launching YubiSwitch while the screen is locked or its lock state is unknown keeps the key enabled for login. If the automatic shutoff timer expires while lock state is unavailable, it retries until the state can be checked; it does not turn the key off while locked.
 - The app's default settings support the Nano. If you have a different model, go into the app's `Preferences` by clicking on the menu icon, then set the the `Product ID` to `0x0114` (or whatever your ProductID is) see: [How to find ProductID and VendorID](#how-to-find-productid-and-vendorid).
 - If your YubiKey is not working, you might want to confirm the `Product ID` and `Vendor ID` follow the how to find your ProductID and VendorID steps below
 - This app only works with recent version of OSX because it relies on the Notification Centre. OSX 10.8.x and above would do it. Sorry about that.
@@ -146,6 +147,9 @@ clang -std=c11 -Wall -Wextra -Werror tests/client_identity_test.c -framework Sec
 /tmp/yubiswitch-client-identity-test yubiswitch.helper/yubiswitch-helper-Info.plist
 clang -fobjc-arc -Wall -Wextra -Werror tests/screen_lock_timer_test.m yubiswitch/ComputerStateMonitor.m -framework Foundation -framework AppKit -framework CoreGraphics -framework IOKit -framework ServiceManagement -framework Security -o /tmp/yubiswitch-screen-lock-test
 /tmp/yubiswitch-screen-lock-test
+xcodebuild -project yubiswitch.xcodeproj -scheme yubiswitch -configuration Debug -destination 'generic/platform=macOS' -derivedDataPath /tmp/yubiswitch-derived MACOSX_DEPLOYMENT_TARGET=13.0 CODE_SIGNING_ALLOWED=NO build
+clang -fobjc-arc -include yubiswitch/yubiswitch-Prefix.pch -include ApplicationServices/ApplicationServices.h tests/app_lock_policy_test.m yubiswitch/AppDelegate.m yubiswitch/YubiKey.m yubiswitch/ComputerStateMonitor.m yubiswitch/PreferencesController.m yubiswitch/AboutWindowController.m -F/tmp/yubiswitch-derived/Build/Products/Debug -framework ShortcutRecorder -Wl,-rpath,/tmp/yubiswitch-derived/Build/Products/Debug -framework AppKit -framework Foundation -framework UserNotifications -framework ServiceManagement -framework Security -framework IOKit -framework CoreGraphics -framework ApplicationServices -o /tmp/yubiswitch-app-lock-policy-test
+/tmp/yubiswitch-app-lock-policy-test
 ```
 
 An unsigned Xcode build is a compile check only. Do not launch it against an existing helper installation. The helper rejects XPC requests from apps that do not match its signed client requirement. Installing and cycling the device requires a signing identity accepted by the app and helper requirements.

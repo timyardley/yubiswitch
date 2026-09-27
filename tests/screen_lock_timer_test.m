@@ -43,6 +43,8 @@ int main(void) {
         ComputerStateMonitor *unknown = [[ComputerStateMonitor alloc]
             initWithYubiKey:(YubiKey *)key sessionDictionary:nil];
         assert(![unknown allowsAutomaticDisableWithSessionDictionary:nil]);
+        assert([unknown allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @NO}]);
         ComputerStateMonitor *monitor = [[ComputerStateMonitor alloc]
             initWithYubiKey:(YubiKey *)key
           sessionDictionary:@{@"CGSSessionScreenIsLocked": @NO}];
@@ -56,6 +58,8 @@ int main(void) {
         [monitor receive:[NSNotification notificationWithName:
             @"com.apple.screenIsLocked" object:nil]];
         assert([monitor isScreenLocked]);
+        assert(![monitor allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @NO}]);
         assert(![monitor allowsAutomaticDisableWithSessionDictionary:
             @{@"CGSSessionScreenIsLocked": @YES}]);
         assert(key.enables == 1);

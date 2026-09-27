@@ -12,6 +12,7 @@
 @interface ComputerStateMonitor : NSObject {
     YubiKey* yk;
     BOOL screenLocked;
+    BOOL lockStateFromNotification;
 }
 
 - (id)initWithYubiKey:(YubiKey *)yubikey;

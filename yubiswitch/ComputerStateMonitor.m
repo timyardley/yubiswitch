@@ -49,6 +49,7 @@
     } else {
         return;
     }
+    lockStateFromNotification = YES;
     BOOL activated =
         [[NSUserDefaults standardUserDefaults] boolForKey:@"disableAtLockSleep"];
 
@@ -82,7 +83,8 @@
     if (![[NSUserDefaults standardUserDefaults] boolForKey:@"disableAtLockSleep"])
         return YES;
     id locked = sessionDictionary[@"CGSSessionScreenIsLocked"];
-    return !screenLocked && [locked isKindOfClass:[NSNumber class]] &&
+    return (!lockStateFromNotification || !screenLocked) &&
+        [locked isKindOfClass:[NSNumber class]] &&
         ![locked boolValue];
 }
 

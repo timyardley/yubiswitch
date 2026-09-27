@@ -23,6 +23,10 @@
 #import "AboutWindowController.h"
 #import <ShortcutRecorder/ShortcutRecorder.h>
 
+@interface AppDelegate ()
+- (BOOL)applyInitialKeyPolicy;
+@end
+
 // This is the main class, responsible for the status bar icon and general
 // application behavior
 
@@ -82,16 +86,16 @@
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     yk = [[YubiKey alloc] init];
-    BOOL disabled = [yk disable];
+    state_monitor = [[ComputerStateMonitor alloc] initWithYubiKey:yk];
+    BOOL applied = [self applyInitialKeyPolicy];
     [self updateMenuState:nil];
-    if (!disabled) {
+    if (!applied) {
         NSAlert *alert = [[NSAlert alloc] init];
         [alert setAlertStyle:NSAlertStyleWarning];
-        [alert setMessageText:@"Could not disable the YubiKey"];
-        [alert setInformativeText:@"YubiSwitch could not confirm that the key was disabled. Check its connection, then try again."];
+        [alert setMessageText:@"Could not set the YubiKey startup state"];
+        [alert setInformativeText:@"YubiSwitch could not confirm the key's state. Check its connection, then try again."];
         [alert runModal];
     }
-    state_monitor = [[ComputerStateMonitor alloc] initWithYubiKey:yk];
     UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
     [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
                           completionHandler:^(BOOL granted, NSError *error) {
@@ -103,6 +107,10 @@
                initWithWindowNibName:@"AboutWindowController"];
     prefwc = [[PreferencesController alloc]
               initWithWindowNibName:@"PreferencesController"];
+}
+
+- (BOOL)applyInitialKeyPolicy {
+    return [state_monitor allowsAutomaticDisable] ? [yk disable] : [yk enable];
 }
 
 - (void)awakeFromNib {
@@ -188,7 +196,11 @@
 
 - (void)reDisableYK {
     reDisableTimer = nil;
-    if (![state_monitor allowsAutomaticDisable]) return;
+    if ([yk isStateKnown] && [yk state]) return;
+    if (![state_monitor allowsAutomaticDisable]) {
+        reDisableTimer = [self createTimer:5];
+        return;
+    }
     BOOL res;
     res = [yk disable];
     if (res == TRUE && [yk isStateKnown]) {

@@ -8,37 +8,47 @@
 
 #import "ComputerStateMonitor.h"
 #import <Foundation/NSDistributedNotificationCenter.h>
+#include <CoreGraphics/CGSession.h>
+
+@interface ComputerStateMonitor ()
+- (instancetype)initWithYubiKey:(YubiKey *)yubikey
+              sessionDictionary:(NSDictionary *)sessionDictionary;
+@end
 
 @implementation ComputerStateMonitor
 
 - (id)initWithYubiKey:(YubiKey *)yubikey {
-    if ( self = [super init] ) {
-        if (yubikey) {
-            yk = yubikey;
+    NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
+    return [self initWithYubiKey:yubikey sessionDictionary:session];
+}
 
-            NSDistributedNotificationCenter * center = [NSDistributedNotificationCenter defaultCenter];
+- (instancetype)initWithYubiKey:(YubiKey *)yubikey
+              sessionDictionary:(NSDictionary *)sessionDictionary {
+    self = [super init];
+    if (self == nil || yubikey == nil) return nil;
+    yk = yubikey;
+    // The lock key is absent from some session dictionaries. Preserve the
+    // key for login until an explicit unlock event resolves unknown state.
+    id locked = sessionDictionary[@"CGSSessionScreenIsLocked"];
+    screenLocked = ![locked isKindOfClass:[NSNumber class]] || [locked boolValue];
 
-            [center addObserver: self
-                       selector:    @selector(receive:)
-                           name:        @"com.apple.screenIsLocked"
-                         object:      nil
-             ];
-            [center addObserver: self
-                       selector:    @selector(receive:)
-                           name:        @"com.apple.screenIsUnlocked"
-                         object:      nil
-             ];
-            return self;
-        }
-        else {
-            return nil;
-        }
-    } else {
-        return nil;
-    }
+    NSDistributedNotificationCenter *center =
+        [NSDistributedNotificationCenter defaultCenter];
+    [center addObserver:self selector:@selector(receive:)
+                  name:@"com.apple.screenIsLocked" object:nil];
+    [center addObserver:self selector:@selector(receive:)
+                  name:@"com.apple.screenIsUnlocked" object:nil];
+    return self;
 }
 
 -(void) receive: (NSNotification*) notification {
+    if ([[notification name] isEqualToString:@"com.apple.screenIsLocked"]) {
+        screenLocked = YES;
+    } else if ([[notification name] isEqualToString:@"com.apple.screenIsUnlocked"]) {
+        screenLocked = NO;
+    } else {
+        return;
+    }
     BOOL activated =
         [[NSUserDefaults standardUserDefaults] boolForKey:@"disableAtLockSleep"];
 
@@ -57,6 +67,23 @@
         NSLog(@"Screen is unlocked, disabling yubikey");
         [yk disable];
     }
+}
+
+- (BOOL)isScreenLocked {
+    return screenLocked;
+}
+
+- (BOOL)allowsAutomaticDisable {
+    NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
+    return [self allowsAutomaticDisableWithSessionDictionary:session];
+}
+
+- (BOOL)allowsAutomaticDisableWithSessionDictionary:(NSDictionary *)sessionDictionary {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"disableAtLockSleep"])
+        return YES;
+    id locked = sessionDictionary[@"CGSSessionScreenIsLocked"];
+    return !screenLocked && [locked isKindOfClass:[NSNumber class]] &&
+        ![locked boolValue];
 }
 
 @end

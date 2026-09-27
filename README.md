@@ -112,7 +112,7 @@ Preference window:
 
 # Known Issues
 
-- A question mark in the menu bar means YubiSwitch could not confirm the key's state. Try enabling it again after the USB device has finished appearing. If the privileged helper restarted while the key was deconfigured, unplug and reconnect the key before retrying. AppleScript exposes `statusKnown` to distinguish an unknown state from a confirmed disabled state.
+- A question mark in the menu bar means YubiSwitch could not confirm the key's state. Try enabling it again after the USB device has finished appearing. If the privileged helper restarted while the key was deconfigured, enabling can recover a device with exactly one valid USB configuration. For a device with multiple configurations, unplug and reconnect it rather than guessing the prior configuration. AppleScript exposes `statusKnown` to distinguish an unknown state from a confirmed disabled state.
 - An enabled indication confirms that a matching key is attached and its selected USB configuration and interfaces have returned. If the key is disconnected, its status remains unknown even though the helper has cleared the disabled policy. Interface enumeration does not prove that an OTP, FIDO, or smart-card authentication succeeds. Test the function you use after installing a properly signed build.
 - The Vendor ID and Product ID filter applies to every matching attached device. YubiSwitch keeps separate restore information for matching devices at different USB locations.
 - If the app exits unexpectedly, the helper attempts to restore the key when its controlling XPC connection closes. Confirm this recovery on a signed build before relying on it.
@@ -144,6 +144,8 @@ clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined tests/usb_poli
 /tmp/yubiswitch-usb-policy-test
 clang -std=c11 -Wall -Wextra -Werror tests/client_identity_test.c -framework Security -framework CoreFoundation -o /tmp/yubiswitch-client-identity-test
 /tmp/yubiswitch-client-identity-test yubiswitch.helper/yubiswitch-helper-Info.plist
+clang -fobjc-arc -Wall -Wextra -Werror tests/screen_lock_timer_test.m yubiswitch/ComputerStateMonitor.m -framework Foundation -framework AppKit -framework CoreGraphics -framework IOKit -framework ServiceManagement -framework Security -o /tmp/yubiswitch-screen-lock-test
+/tmp/yubiswitch-screen-lock-test
 ```
 
 An unsigned Xcode build is a compile check only. Do not launch it against an existing helper installation. The helper rejects XPC requests from apps that do not match its signed client requirement. Installing and cycling the device requires a signing identity accepted by the app and helper requirements.

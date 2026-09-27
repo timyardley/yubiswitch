@@ -23,6 +23,7 @@ typedef struct {
     bool (*list)(void *, int, int, USBPolicyDevice **, size_t *);
     void (*release)(void *, USBPolicyDevice *, size_t);
     bool (*getConfiguration)(void *, const USBPolicyDevice *, unsigned char *);
+    bool (*getRecoveryConfiguration)(void *, const USBPolicyDevice *, unsigned char *);
     bool (*setConfiguration)(void *, const USBPolicyDevice *, unsigned char);
     bool (*setSuspended)(void *, const USBPolicyDevice *, bool);
     bool (*isReady)(void *, const USBPolicyDevice *);

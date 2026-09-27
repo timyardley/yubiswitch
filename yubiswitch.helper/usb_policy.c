@@ -125,9 +125,41 @@ bool usb_policy_restore(USBPolicy *policy, const USBPolicyOps *ops,
             ops->setSuspended(ops->context, device, false);
         }
         unsigned char configuration = 0;
-        if (!ops->getConfiguration(ops->context, device, &configuration)) {
+        bool readConfiguration = ops->getConfiguration(
+            ops->context, device, &configuration);
+        if (!readConfiguration && record == NULL) {
+            // A restarted helper has no record that the previous instance
+            // suspended this device. Resume before retrying the read.
+            ops->setSuspended(ops->context, device, false);
+            readConfiguration = ops->getConfiguration(
+                ops->context, device, &configuration);
+        }
+        if (!readConfiguration) {
             success = false;
             continue;
+        }
+        if (record == NULL && configuration == 0) {
+            // Resume before reading descriptors: a previous helper may have
+            // suspended the device and then exited without a restore record.
+            ops->setSuspended(ops->context, device, false);
+            unsigned char recoveryConfiguration = 0;
+            if (ops->getRecoveryConfiguration == NULL ||
+                !ops->getRecoveryConfiguration(ops->context, device,
+                                               &recoveryConfiguration) ||
+                recoveryConfiguration == 0) {
+                success = false;
+                continue;
+            }
+            // Verify the result below because resume or set can report an
+            // error after taking effect.
+            ops->setConfiguration(ops->context, device,
+                                  recoveryConfiguration);
+            if (!ops->getConfiguration(ops->context, device,
+                                       &configuration) ||
+                configuration != recoveryConfiguration) {
+                success = false;
+                continue;
+            }
         }
         if (record != NULL && configuration != record->configuration) {
             ops->setConfiguration(ops->context, device,

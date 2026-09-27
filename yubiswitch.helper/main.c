@@ -172,6 +172,27 @@ static bool usb_get_configuration(void *context,
     return true;
 }
 
+static bool usb_get_recovery_configuration(void *context,
+                                           const USBPolicyDevice *device,
+                                           unsigned char *configuration) {
+    (void)context;
+    IOUSBDeviceInterface182 **dev = usb_interface_create(
+        (io_service_t)(uintptr_t)device->handle);
+    if (dev == NULL) return false;
+    UInt8 count = 0;
+    IOUSBConfigurationDescriptorPtr descriptor = NULL;
+    bool unique = (*dev)->GetNumberOfConfigurations(dev, &count) ==
+                      kIOReturnSuccess && count == 1 &&
+                  (*dev)->GetConfigurationDescriptorPtr(dev, 0,
+                                                        &descriptor) ==
+                      kIOReturnSuccess && descriptor != NULL &&
+                  descriptor->bConfigurationValue != 0;
+    if (unique) *configuration = descriptor->bConfigurationValue;
+    (*dev)->Release(dev);
+    if (!unique) ylog("Cannot identify a unique USB recovery configuration");
+    return unique;
+}
+
 static bool usb_set_configuration(void *context,
                                   const USBPolicyDevice *device,
                                   unsigned char configuration) {
@@ -290,7 +311,8 @@ static void usb_disable_remote_wake(void *context,
 
 static const USBPolicyOps usbOps = {
     NULL, usb_list_devices, usb_release_devices, usb_get_configuration,
-    usb_set_configuration, usb_set_suspended, usb_is_ready,
+    usb_get_recovery_configuration, usb_set_configuration,
+    usb_set_suspended, usb_is_ready,
     usb_disable_remote_wake
 };
 

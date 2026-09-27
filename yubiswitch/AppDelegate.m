@@ -187,6 +187,8 @@
 }
 
 - (void)reDisableYK {
+    reDisableTimer = nil;
+    if (![state_monitor allowsAutomaticDisable]) return;
     BOOL res;
     res = [yk disable];
     if (res == TRUE && [yk isStateKnown]) {

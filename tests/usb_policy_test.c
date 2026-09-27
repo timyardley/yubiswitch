@@ -8,11 +8,14 @@
 typedef struct {
     USBPolicyDevice devices[4];
     unsigned char configurations[4];
+    unsigned char uniqueConfigurations[4];
     bool suspended[4];
     bool ready[4];
     size_t count;
     bool failSuspend;
     bool failSuspendAfterEffect;
+    bool readRequiresResume;
+    bool descriptorRequiresResume;
     bool failResumeAfterEffect;
     bool failHIDForNewFilter;
     bool failVerifyAfterNewDisable;
@@ -61,12 +64,24 @@ static size_t index_for(Fake *fake, const USBPolicyDevice *device) {
 static bool get_configuration(void *context, const USBPolicyDevice *device,
                               unsigned char *configuration) {
     Fake *fake = context;
+    if (fake->readRequiresResume &&
+        fake->suspended[index_for(fake, device)]) return false;
     if (fake->verifyFailurePending && device->vendorID == 0x2222) {
         fake->verifyFailurePending = false;
         return false;
     }
     *configuration = fake->configurations[index_for(fake, device)];
     return true;
+}
+
+static bool get_recovery_configuration(void *context,
+                                       const USBPolicyDevice *device,
+                                       unsigned char *configuration) {
+    Fake *fake = context;
+    if (fake->descriptorRequiresResume &&
+        fake->suspended[index_for(fake, device)]) return false;
+    *configuration = fake->uniqueConfigurations[index_for(fake, device)];
+    return *configuration != 0;
 }
 
 static bool set_configuration(void *context, const USBPolicyDevice *device,
@@ -133,7 +148,8 @@ static void close_hid(void *context) {
 
 static USBPolicyOps operations(Fake *fake) {
     return (USBPolicyOps){fake, list_devices, release_devices,
-                          get_configuration, set_configuration,
+                          get_configuration, get_recovery_configuration,
+                          set_configuration,
                           set_suspended, is_ready, disable_remote_wake};
 }
 
@@ -147,6 +163,7 @@ static void add_device(Fake *fake, int vendor, int product, uint64_t registry,
     fake->devices[index] = (USBPolicyDevice){vendor, product, registry,
                                               location, NULL};
     fake->configurations[index] = 1;
+    fake->uniqueConfigurations[index] = 1;
     fake->ready[index] = true;
 }
 
@@ -233,6 +250,61 @@ static void test_disconnected_key_keeps_restore_record(void) {
     fake.count = 0;
     assert(usb_policy_restore(&policy, &ops, 0x1050, 0x0407));
     assert(usb_policy_has_pending(&policy));
+    usb_policy_clear(&policy);
+}
+
+static void test_helper_restart_restores_unique_configuration(void) {
+    Fake fake = {0};
+    USBPolicy policy = {0};
+    add_device(&fake, 0x1050, 0x0407, 11, 100);
+    fake.configurations[0] = 0;
+    fake.suspended[0] = true;
+    USBPolicyOps ops = operations(&fake);
+    assert(usb_policy_restore(&policy, &ops, 0x1050, 0x0407));
+    assert(fake.resumeCalls == 1);
+    assert(fake.configurations[0] == 1);
+    assert(!fake.suspended[0]);
+    usb_policy_clear(&policy);
+}
+
+static void test_helper_restart_resumes_before_configuration_read(void) {
+    Fake fake = {0};
+    USBPolicy policy = {0};
+    add_device(&fake, 0x1050, 0x0407, 11, 100);
+    fake.configurations[0] = 0;
+    fake.suspended[0] = true;
+    fake.readRequiresResume = true;
+    USBPolicyOps ops = operations(&fake);
+    assert(usb_policy_restore(&policy, &ops, 0x1050, 0x0407));
+    assert(fake.configurations[0] == 1);
+    assert(!fake.suspended[0]);
+    usb_policy_clear(&policy);
+}
+
+static void test_helper_restart_resumes_before_descriptor_read(void) {
+    Fake fake = {0};
+    USBPolicy policy = {0};
+    add_device(&fake, 0x1050, 0x0407, 11, 100);
+    fake.configurations[0] = 0;
+    fake.suspended[0] = true;
+    fake.descriptorRequiresResume = true;
+    USBPolicyOps ops = operations(&fake);
+    assert(usb_policy_restore(&policy, &ops, 0x1050, 0x0407));
+    assert(fake.configurations[0] == 1);
+    assert(!fake.suspended[0]);
+    usb_policy_clear(&policy);
+}
+
+static void test_helper_restart_rejects_ambiguous_configuration(void) {
+    Fake fake = {0};
+    USBPolicy policy = {0};
+    add_device(&fake, 0x1050, 0x0407, 11, 100);
+    fake.configurations[0] = 0;
+    fake.uniqueConfigurations[0] = 0;
+    USBPolicyOps ops = operations(&fake);
+    assert(!usb_policy_restore(&policy, &ops, 0x1050, 0x0407));
+    assert(fake.configurations[0] == 0);
+    assert(fake.restoreCalls == 0);
     usb_policy_clear(&policy);
 }
 
@@ -340,12 +412,16 @@ int main(void) {
     test_port_move_restores_new_attachment();
     test_two_identical_keys_are_both_restored();
     test_disconnected_key_keeps_restore_record();
+    test_helper_restart_restores_unique_configuration();
+    test_helper_restart_resumes_before_configuration_read();
+    test_helper_restart_resumes_before_descriptor_read();
+    test_helper_restart_rejects_ambiguous_configuration();
     test_controller_loss_restores_every_filter();
     test_identity_without_registry_id_uses_location();
     test_filter_change_rolls_back_when_hid_setup_fails();
     test_not_ready_does_not_report_restored();
     test_filter_change_restores_partial_new_disable();
     test_filter_change_reapplies_old_disable_after_unready_restore();
-    puts("usb_policy_test: 12 passed");
+    puts("usb_policy_test: 16 passed");
     return 0;
 }

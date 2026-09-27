@@ -213,6 +213,7 @@
         [self notify:@"YubiKey disabled"];
     } else {
         [self showUnknownState];
+        reDisableTimer = [self createTimer:10];
     }
 }
 

@@ -13,6 +13,8 @@
 @interface ComputerStateMonitor ()
 - (instancetype)initWithYubiKey:(YubiKey *)yubikey
               sessionDictionary:(NSDictionary *)sessionDictionary;
+- (BOOL)allowsAutomaticDisableWithSessionDictionary:(NSDictionary *)sessionDictionary
+                                          atUptime:(NSTimeInterval)uptime;
 @end
 
 @implementation ComputerStateMonitor
@@ -50,6 +52,7 @@
         return;
     }
     lockStateFromNotification = YES;
+    hasUnlockedSessionObservation = NO;
     BOOL activated =
         [[NSUserDefaults standardUserDefaults] boolForKey:@"disableAtLockSleep"];
 
@@ -80,12 +83,33 @@
 }
 
 - (BOOL)allowsAutomaticDisableWithSessionDictionary:(NSDictionary *)sessionDictionary {
-    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"disableAtLockSleep"])
+    return [self allowsAutomaticDisableWithSessionDictionary:sessionDictionary
+                                                   atUptime:[NSProcessInfo processInfo].systemUptime];
+}
+
+- (BOOL)allowsAutomaticDisableWithSessionDictionary:(NSDictionary *)sessionDictionary
+                                          atUptime:(NSTimeInterval)uptime {
+    if (![[NSUserDefaults standardUserDefaults] boolForKey:@"disableAtLockSleep"]) {
+        hasUnlockedSessionObservation = NO;
         return YES;
+    }
     id locked = sessionDictionary[@"CGSSessionScreenIsLocked"];
-    return (!lockStateFromNotification || !screenLocked) &&
-        [locked isKindOfClass:[NSNumber class]] &&
-        ![locked boolValue];
+    if (![locked isKindOfClass:[NSNumber class]] || [locked boolValue]) {
+        hasUnlockedSessionObservation = NO;
+        return NO;
+    }
+    if (lockStateFromNotification && screenLocked) {
+        // A lock event can precede the session snapshot. Require the current
+        // session to remain unlocked across a timer retry before overriding it.
+        if (!hasUnlockedSessionObservation) {
+            unlockedSessionObservedAt = uptime;
+            hasUnlockedSessionObservation = YES;
+            return NO;
+        }
+        if (uptime - unlockedSessionObservedAt < 5) return NO;
+        screenLocked = NO;
+    }
+    return YES;
 }
 
 @end

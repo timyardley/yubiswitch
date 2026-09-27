@@ -13,6 +13,8 @@
     YubiKey* yk;
     BOOL screenLocked;
     BOOL lockStateFromNotification;
+    BOOL hasUnlockedSessionObservation;
+    NSTimeInterval unlockedSessionObservedAt;
 }
 
 - (id)initWithYubiKey:(YubiKey *)yubikey;

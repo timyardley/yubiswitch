@@ -10,6 +10,8 @@
 - (instancetype)initWithYubiKey:(YubiKey *)key
               sessionDictionary:(NSDictionary *)sessionDictionary;
 - (BOOL)allowsAutomaticDisableWithSessionDictionary:(NSDictionary *)sessionDictionary;
+- (BOOL)allowsAutomaticDisableWithSessionDictionary:(NSDictionary *)sessionDictionary
+                                          atUptime:(NSTimeInterval)uptime;
 @end
 
 @interface FakeKey : NSObject
@@ -62,6 +64,19 @@ int main(void) {
             @{@"CGSSessionScreenIsLocked": @NO}]);
         assert(![monitor allowsAutomaticDisableWithSessionDictionary:
             @{@"CGSSessionScreenIsLocked": @YES}]);
+        // A missed unlock notification must not keep a confirmed unlocked
+        // session blocked forever. A conflicting locked read resets confidence.
+        assert(![monitor allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @NO} atUptime:100]);
+        assert(![monitor allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @YES} atUptime:101]);
+        assert(![monitor allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @NO} atUptime:102]);
+        assert(![monitor allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @NO} atUptime:106]);
+        assert([monitor allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @NO} atUptime:107]);
+        assert(![monitor isScreenLocked]);
         assert(key.enables == 1);
         [[NSUserDefaults standardUserDefaults]
             setVolatileDomain:@{@"disableAtLockSleep": @NO}
@@ -76,6 +91,26 @@ int main(void) {
         assert([monitor allowsAutomaticDisableWithSessionDictionary:
             @{@"CGSSessionScreenIsLocked": @NO}]);
         assert(key.disables == 1);
+
+        ComputerStateMonitor *preferenceChange = [[ComputerStateMonitor alloc]
+            initWithYubiKey:(YubiKey *)key
+          sessionDictionary:@{@"CGSSessionScreenIsLocked": @NO}];
+        [preferenceChange receive:[NSNotification notificationWithName:
+            @"com.apple.screenIsLocked" object:nil]];
+        assert(![preferenceChange allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @NO} atUptime:200]);
+        [[NSUserDefaults standardUserDefaults]
+            setVolatileDomain:@{@"disableAtLockSleep": @NO}
+                   forName:NSArgumentDomain];
+        assert([preferenceChange allowsAutomaticDisableWithSessionDictionary:nil
+                                                                    atUptime:201]);
+        [[NSUserDefaults standardUserDefaults]
+            setVolatileDomain:@{@"disableAtLockSleep": @YES}
+                   forName:NSArgumentDomain];
+        assert(![preferenceChange allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @NO} atUptime:207]);
+        assert([preferenceChange allowsAutomaticDisableWithSessionDictionary:
+            @{@"CGSSessionScreenIsLocked": @NO} atUptime:212]);
         puts("screen_lock_timer_test: lock state tracked");
     }
     return 0;

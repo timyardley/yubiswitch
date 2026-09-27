@@ -11,6 +11,8 @@
 @property(nonatomic) NSUInteger enables;
 @property(nonatomic) NSUInteger disables;
 @property(nonatomic) BOOL disabled;
+@property(nonatomic) BOOL stateKnown;
+@property(nonatomic) BOOL failNextDisable;
 - (BOOL)enable;
 - (BOOL)disable;
 - (BOOL)isStateKnown;
@@ -18,9 +20,19 @@
 @end
 
 @implementation FakeKey
-- (BOOL)enable { self.enables++; self.disabled = NO; return YES; }
-- (BOOL)disable { self.disables++; self.disabled = YES; return YES; }
-- (BOOL)isStateKnown { return YES; }
+- (BOOL)enable { self.enables++; self.disabled = NO; self.stateKnown = YES; return YES; }
+- (BOOL)disable {
+    self.disables++;
+    if (self.failNextDisable) {
+        self.failNextDisable = NO;
+        self.stateKnown = NO;
+        return NO;
+    }
+    self.disabled = YES;
+    self.stateKnown = YES;
+    return YES;
+}
+- (BOOL)isStateKnown { return self.stateKnown; }
 - (BOOL)state { return self.disabled; }
 @end
 
@@ -80,6 +92,18 @@ int main(void) {
         monitor.allowsDisable = NO;
         [delegate reDisableYK];
         assert(key.disables == 2);
+        assert([delegate pendingDisableTimer] == nil);
+
+        // A helper error leaves the key on and must retain the shutoff intent.
+        key.disabled = NO;
+        key.failNextDisable = YES;
+        monitor.allowsDisable = YES;
+        [delegate reDisableYK];
+        assert(key.disables == 3 && !key.disabled);
+        retry = [delegate pendingDisableTimer];
+        assert(retry != nil && [retry isValid]);
+        [retry fire];
+        assert(key.disables == 4 && key.disabled && key.stateKnown);
         assert([delegate pendingDisableTimer] == nil);
         puts("app_lock_policy_test: startup and timer recovery passed");
     }

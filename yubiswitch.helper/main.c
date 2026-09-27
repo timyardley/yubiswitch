@@ -56,6 +56,7 @@ static io_iterator_t usbAddedIterator;
 static io_connect_t pmRootPort;
 static IONotificationPortRef pmNotifyPort;
 static io_object_t pmNotifier;
+enum { kUSBReconcileAttempts = 8 };
 
 static void match_set(CFMutableDictionaryRef dict, CFStringRef key, int value) {
     CFNumberRef number = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &value);
@@ -165,7 +166,9 @@ static bool usb_get_configuration(void *context,
     IOReturn result = (*dev)->GetConfiguration(dev, &value);
     (*dev)->Release(dev);
     if (result != kIOReturnSuccess) {
-        ylog("Could not read USB configuration: 0x%x", result);
+        ylog("Could not read USB configuration for registry %llu at location 0x%x: 0x%x",
+             (unsigned long long)device->registryID, device->locationID,
+             result);
         return false;
     }
     *configuration = value;
@@ -187,9 +190,17 @@ static bool usb_get_recovery_configuration(void *context,
                                                         &descriptor) ==
                       kIOReturnSuccess && descriptor != NULL &&
                   descriptor->bConfigurationValue != 0;
-    if (unique) *configuration = descriptor->bConfigurationValue;
+    if (unique) {
+        *configuration = descriptor->bConfigurationValue;
+        ylog("USB recovery selected sole configuration %u for registry %llu at location 0x%x",
+             *configuration, (unsigned long long)device->registryID,
+             device->locationID);
+    }
     (*dev)->Release(dev);
-    if (!unique) ylog("Cannot identify a unique USB recovery configuration");
+    if (!unique) {
+        ylog("Cannot identify a unique USB recovery configuration for registry %llu at location 0x%x",
+             (unsigned long long)device->registryID, device->locationID);
+    }
     return unique;
 }
 
@@ -207,8 +218,13 @@ static bool usb_set_configuration(void *context,
     }
     (*dev)->Release(dev);
     if (result != kIOReturnSuccess) {
-        ylog("Could not set USB configuration %u: 0x%x",
-             configuration, result);
+        ylog("Could not set USB configuration %u for registry %llu at location 0x%x: 0x%x",
+             configuration, (unsigned long long)device->registryID,
+             device->locationID, result);
+    } else {
+        ylog("USB configuration %u accepted for registry %llu at location 0x%x; awaiting verification",
+             configuration, (unsigned long long)device->registryID,
+             device->locationID);
     }
     return result == kIOReturnSuccess;
 }
@@ -226,7 +242,13 @@ static bool usb_set_suspended(void *context, const USBPolicyDevice *device,
     }
     (*dev)->Release(dev);
     if (result != kIOReturnSuccess) {
-        ylog("USB %s failed: 0x%x", suspended ? "suspend" : "resume", result);
+        ylog("USB %s failed for registry %llu at location 0x%x: 0x%x",
+             suspended ? "suspend" : "resume",
+             (unsigned long long)device->registryID, device->locationID,
+             result);
+    } else if (suspended) {
+        ylog("USB suspend accepted for registry %llu at location 0x%x",
+             (unsigned long long)device->registryID, device->locationID);
     }
     return result == kIOReturnSuccess;
 }
@@ -280,21 +302,33 @@ static bool usb_is_ready(void *context, const USBPolicyDevice *device) {
     (void)context;
     unsigned expected = usb_expected_interface_count(device);
     if (expected == 0) {
-        ylog("Could not determine expected USB interfaces");
+        ylog("Could not determine expected USB interfaces for registry %llu at location 0x%x",
+             (unsigned long long)device->registryID, device->locationID);
         return false;
     }
     io_service_t service = (io_service_t)(uintptr_t)device->handle;
     mach_timespec_t quietTime = {2, 0};
     IOReturn quiet = IOServiceWaitQuiet(service, &quietTime);
     if (quiet != kIOReturnSuccess) {
-        ylog("USB interface enumeration did not settle: 0x%x", quiet);
+        ylog("USB interface enumeration did not settle for registry %llu at location 0x%x: 0x%x",
+             (unsigned long long)device->registryID, device->locationID,
+             quiet);
         return false;
     }
+    unsigned observed = 0;
     for (unsigned attempt = 0; attempt < 10; attempt++) {
-        if (usb_interface_count(service, 0) >= expected) return true;
+        observed = usb_interface_count(service, 0);
+        if (observed >= expected) {
+            ylog("USB interfaces ready for registry %llu at location 0x%x: %u/%u",
+                 (unsigned long long)device->registryID, device->locationID,
+                 observed, expected);
+            return true;
+        }
         usleep(100000);
     }
-    ylog("USB device interfaces did not enumerate after restore");
+    ylog("USB interfaces not ready for registry %llu at location 0x%x: %u/%u",
+         (unsigned long long)device->registryID, device->locationID,
+         observed, expected);
     return false;
 }
 
@@ -427,7 +461,11 @@ static void schedule_usb_reconcile(unsigned attempts, uint64_t generation) {
     if (attempts == 0) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
-        if (generation != requestGeneration) return;
+        if (generation != requestGeneration) {
+            ylog("USB reconciliation cancelled by a newer request (generation %llu)",
+                 (unsigned long long)generation);
+            return;
+        }
         bool success;
         if (desiredDisabled) {
             bool restoredOthers = usb_policy_restore_except(
@@ -440,7 +478,15 @@ static void schedule_usb_reconcile(unsigned attempts, uint64_t generation) {
         } else {
             success = usb_device_enable();
         }
-        if (!success) {
+        if (success) {
+            ylog("USB reconciliation completed after attempt %u; desired disabled=%d, pending restore records=%d",
+                 kUSBReconcileAttempts - attempts + 1, desiredDisabled,
+                 usb_policy_has_pending(&usbPolicy));
+        } else if (attempts == 1) {
+            ylog("USB reconciliation exhausted %u attempts; desired disabled=%d, pending restore records=%d",
+                 kUSBReconcileAttempts, desiredDisabled,
+                 usb_policy_has_pending(&usbPolicy));
+        } else {
             schedule_usb_reconcile(attempts - 1, generation);
         }
     });
@@ -448,14 +494,21 @@ static void schedule_usb_reconcile(unsigned attempts, uint64_t generation) {
 
 static void usb_matched_callback(void *context, io_iterator_t iterator) {
     io_service_t service;
-    while ((service = IOIteratorNext(iterator)) != 0) IOObjectRelease(service);
+    unsigned matched = 0;
+    while ((service = IOIteratorNext(iterator)) != 0) {
+        matched++;
+        IOObjectRelease(service);
+    }
     if (desiredDisabled || usb_policy_has_pending(&usbPolicy)) {
-        schedule_usb_reconcile(8, requestGeneration);
+        ylog("USB match notification (%u devices); reconciling disabled=%d, pending restore records=%d",
+             matched, desiredDisabled, usb_policy_has_pending(&usbPolicy));
+        schedule_usb_reconcile(kUSBReconcileAttempts, requestGeneration);
     }
 }
 
 static void controller_disconnected(xpc_connection_t connection) {
     if (controllerConnection != connection) return;
+    ylog("App connection lost; restoring USB policy");
     xpc_release(controllerConnection);
     controllerConnection = NULL;
     requestGeneration++;
@@ -463,7 +516,10 @@ static void controller_disconnected(xpc_connection_t connection) {
     close_hid_manager();
     if (!usb_device_enable()) {
         ylog("App connection lost before USB restore completed");
-        schedule_usb_reconcile(8, requestGeneration);
+        schedule_usb_reconcile(kUSBReconcileAttempts, requestGeneration);
+    } else {
+        ylog("USB restore check completed after app disconnect; pending restore records=%d",
+             usb_policy_has_pending(&usbPolicy));
     }
 }
 
@@ -492,6 +548,14 @@ static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
         controllerConnection = xpc_retain(connection);
     }
     if (controllerConnection != connection) valid = false;
+    if (valid) {
+        ylog("USB policy request: %s for %04x:%04x (generation %llu)",
+             action == 1 ? "enable" : "disable", (unsigned int)vendor,
+             (unsigned int)product,
+             (unsigned long long)(requestGeneration + 1));
+    } else {
+        ylog("Rejected invalid or non-controller USB policy request");
+    }
     Boolean success = false;
     bool selectedPresent = true;
     if (valid && action == 1) {
@@ -504,19 +568,25 @@ static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
         if (success && !selected_device_present(&selectedPresent)) {
             success = false;
         }
-        if (!success) schedule_usb_reconcile(8, requestGeneration);
+        if (!success) schedule_usb_reconcile(kUSBReconcileAttempts, requestGeneration);
     } else if (valid) {
         int oldVendor = selectedVendorID;
         int oldProduct = selectedProductID;
         Boolean filterChanged = desiredDisabled &&
             (oldVendor != vendor || oldProduct != product);
         if (filterChanged) {
+            ylog("Changing disabled USB filter from %04x:%04x to %04x:%04x",
+                 (unsigned int)oldVendor, (unsigned int)oldProduct,
+                 (unsigned int)vendor, (unsigned int)product);
             success = usb_policy_change_filter(
                 &usbPolicy, &usbOps, &hidOps, oldVendor, oldProduct,
                 (int)vendor, (int)product);
             if (success) {
                 selectedVendorID = (int)vendor;
                 selectedProductID = (int)product;
+            } else {
+                ylog("USB filter change failed; previous filter remains requested, pending restore records=%d",
+                     usb_policy_has_pending(&usbPolicy));
             }
         } else {
             Boolean wasDisabled = desiredDisabled;
@@ -531,6 +601,7 @@ static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
                 selectedVendorID, selectedProductID);
             success = restoredOthers && hidReady && usbReady;
             if (!success && !wasDisabled) {
+                ylog("First USB disable failed; restoring the previously enabled policy");
                 // A failed first disable can already have changed USB state.
                 // Restore it and keep the previously enabled policy.
                 desiredDisabled = false;
@@ -539,11 +610,20 @@ static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
                 selectedProductID = oldProduct;
                 if (!usb_device_enable()) {
                     ylog("Failed disable left USB restore work pending");
+                } else {
+                    ylog("Failed disable rollback check completed; pending restore records=%d",
+                         usb_policy_has_pending(&usbPolicy));
                 }
             }
         }
         requestGeneration++;
-        if (!success) schedule_usb_reconcile(8, requestGeneration);
+        if (!success) schedule_usb_reconcile(kUSBReconcileAttempts, requestGeneration);
+    }
+    if (valid) {
+        ylog("USB policy result: %s for %04x:%04x; desired disabled=%d, pending restore records=%d",
+             !success ? "ERROR" : !selectedPresent ? "ABSENT" : "OK",
+             (unsigned int)vendor, (unsigned int)product, desiredDisabled,
+             usb_policy_has_pending(&usbPolicy));
     }
     xpc_object_t reply = xpc_dictionary_create_reply(event);
     if (reply != NULL) {
@@ -576,7 +656,9 @@ static void powerCallback(void *refCon, io_service_t service,
             break;
         case kIOMessageSystemHasPoweredOn:
             if (desiredDisabled || usb_policy_has_pending(&usbPolicy)) {
-                schedule_usb_reconcile(8, requestGeneration);
+                ylog("Wake detected; reconciling disabled=%d, pending restore records=%d",
+                     desiredDisabled, usb_policy_has_pending(&usbPolicy));
+                schedule_usb_reconcile(kUSBReconcileAttempts, requestGeneration);
             }
             break;
         default:
@@ -592,15 +674,21 @@ int main(int argc, const char *argv[]) {
     dispatch_source_t interrupt = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL,
                                                           SIGINT, 0, dispatch_get_main_queue());
     dispatch_source_set_event_handler(term, ^{
+        ylog("SIGTERM received; restoring USB before helper exit");
         close_hid_manager();
         Boolean restored = usb_device_enable();
         if (!restored) ylog("Helper exited before USB restore completed");
+        else ylog("USB restore check completed before helper exit; pending restore records=%d",
+                  usb_policy_has_pending(&usbPolicy));
         exit(restored ? EXIT_SUCCESS : EXIT_FAILURE);
     });
     dispatch_source_set_event_handler(interrupt, ^{
+        ylog("SIGINT received; restoring USB before helper exit");
         close_hid_manager();
         Boolean restored = usb_device_enable();
         if (!restored) ylog("Helper exited before USB restore completed");
+        else ylog("USB restore check completed before helper exit; pending restore records=%d",
+                  usb_policy_has_pending(&usbPolicy));
         exit(restored ? EXIT_SUCCESS : EXIT_FAILURE);
     });
     dispatch_resume(term);

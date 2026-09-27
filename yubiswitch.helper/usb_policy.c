@@ -21,8 +21,8 @@ static bool same_device(const USBPolicyRecord *record,
                         const USBPolicyDevice *device) {
     if (record->vendorID != device->vendorID ||
         record->productID != device->productID) return false;
-    if (record->registryID != 0 &&
-        record->registryID == device->registryID) return true;
+    if (record->registryID != 0 && device->registryID != 0)
+        return record->registryID == device->registryID;
     return record->locationID != 0 &&
            record->locationID == device->locationID;
 }
@@ -59,6 +59,24 @@ static void remove_record(USBPolicyRecord **slot) {
     USBPolicyRecord *record = *slot;
     *slot = record->next;
     free(record);
+}
+
+static void retire_replaced_record(USBPolicy *policy,
+                                   const USBPolicyDevice *device) {
+    if (device->registryID == 0 || device->locationID == 0) return;
+    USBPolicyRecord **slot = &policy->records;
+    while (*slot != NULL) {
+        USBPolicyRecord *record = *slot;
+        if (record->vendorID == device->vendorID &&
+            record->productID == device->productID &&
+            record->locationID == device->locationID &&
+            record->registryID != 0 &&
+            record->registryID != device->registryID) {
+            remove_record(slot);
+        } else {
+            slot = &record->next;
+        }
+    }
 }
 
 bool usb_policy_disable(USBPolicy *policy, const USBPolicyOps *ops,
@@ -99,9 +117,6 @@ bool usb_policy_disable(USBPolicy *policy, const USBPolicyOps *ops,
         // a suspend attempt, then verify configuration and interfaces.
         ops->setSuspended(ops->context, device, true);
         record->resumeNeeded = true;
-        if (ops->disableRemoteWake != NULL) {
-            ops->disableRemoteWake(ops->context, device);
-        }
     }
     ops->release(ops->context, devices, count);
     return success;
@@ -177,6 +192,7 @@ bool usb_policy_restore(USBPolicy *policy, const USBPolicyOps *ops,
             continue;
         }
         if (record != NULL) remove_record(slot);
+        retire_replaced_record(policy, device);
     }
     ops->release(ops->context, devices, count);
     return success;

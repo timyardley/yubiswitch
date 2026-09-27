@@ -298,22 +298,10 @@ static bool usb_is_ready(void *context, const USBPolicyDevice *device) {
     return false;
 }
 
-static void usb_disable_remote_wake(void *context,
-                                    const USBPolicyDevice *device) {
-    (void)context;
-    IOReturn result = IORegistryEntrySetCFProperty(
-        (io_service_t)(uintptr_t)device->handle,
-        CFSTR("kUSBHostDevicePropertyRemoteWakeOverride"), kCFBooleanFalse);
-    if (result != kIOReturnSuccess) {
-        ylog("Could not set remote wake override: 0x%x", result);
-    }
-}
-
 static const USBPolicyOps usbOps = {
     NULL, usb_list_devices, usb_release_devices, usb_get_configuration,
     usb_get_recovery_configuration, usb_set_configuration,
-    usb_set_suspended, usb_is_ready,
-    usb_disable_remote_wake
+    usb_set_suspended, usb_is_ready
 };
 
 static Boolean usb_device_enable(void) {
@@ -531,6 +519,7 @@ static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
                 selectedProductID = (int)product;
             }
         } else {
+            Boolean wasDisabled = desiredDisabled;
             selectedVendorID = (int)vendor;
             selectedProductID = (int)product;
             desiredDisabled = true;
@@ -541,6 +530,17 @@ static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
             Boolean usbReady = hidReady && usb_device_disable(
                 selectedVendorID, selectedProductID);
             success = restoredOthers && hidReady && usbReady;
+            if (!success && !wasDisabled) {
+                // A failed first disable can already have changed USB state.
+                // Restore it and keep the previously enabled policy.
+                desiredDisabled = false;
+                close_hid_manager();
+                selectedVendorID = oldVendor;
+                selectedProductID = oldProduct;
+                if (!usb_device_enable()) {
+                    ylog("Failed disable left USB restore work pending");
+                }
+            }
         }
         requestGeneration++;
         if (!success) schedule_usb_reconcile(8, requestGeneration);
@@ -609,15 +609,20 @@ int main(int argc, const char *argv[]) {
     // Register for system sleep/wake notifications
     pmRootPort = IORegisterForSystemPower(NULL, &pmNotifyPort,
                                           powerCallback, &pmNotifier);
-    if (pmRootPort) {
+    if (pmRootPort && pmNotifyPort != NULL &&
+        IONotificationPortGetRunLoopSource(pmNotifyPort) != NULL) {
         CFRunLoopAddSource(CFRunLoopGetMain(),
                            IONotificationPortGetRunLoopSource(pmNotifyPort),
                            kCFRunLoopCommonModes);
         ylog("Registered for system power notifications");
+    } else {
+        ylog("Could not register system power notifications");
+        exit(EXIT_FAILURE);
     }
 
     usbNotifyPort = IONotificationPortCreate(kIOMainPortDefault);
-    if (usbNotifyPort != NULL) {
+    if (usbNotifyPort != NULL &&
+        IONotificationPortGetRunLoopSource(usbNotifyPort) != NULL) {
         CFRunLoopAddSource(CFRunLoopGetMain(),
                            IONotificationPortGetRunLoopSource(usbNotifyPort),
                            kCFRunLoopCommonModes);
@@ -629,7 +634,11 @@ int main(int argc, const char *argv[]) {
             usb_matched_callback(NULL, usbAddedIterator);
         } else {
             ylog("Could not register USB match notification: 0x%x", result);
+            exit(EXIT_FAILURE);
         }
+    } else {
+        ylog("Could not create USB match notification port");
+        exit(EXIT_FAILURE);
     }
 
     xpc_connection_t service = xpc_connection_create_mach_service("com.zgilburd.yubiswitch.helper",

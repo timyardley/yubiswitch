@@ -55,8 +55,7 @@
     }
     lockStateFromNotification = YES;
     hasUnlockedSessionObservation = NO;
-    [automaticRetryTimer invalidate];
-    automaticRetryTimer = nil;
+    [self cancelAutomaticRetry];
     BOOL activated =
         [[NSUserDefaults standardUserDefaults] boolForKey:@"disableAtLockSleep"];
 
@@ -87,14 +86,19 @@
     [[NSRunLoop mainRunLoop] addTimer:automaticRetryTimer forMode:NSRunLoopCommonModes];
 }
 
+- (void)cancelAutomaticRetry {
+    [automaticRetryTimer invalidate];
+    automaticRetryTimer = nil;
+}
+
 - (void)retryAutomaticAction:(NSTimer *)timer {
+    if (timer != automaticRetryTimer) return;
     NSDictionary *session = CFBridgingRelease(CGSessionCopyCurrentDictionary());
     [self retryAutomaticActionWithSessionDictionary:session];
 }
 
 - (void)retryAutomaticActionWithSessionDictionary:(NSDictionary *)sessionDictionary {
-    [automaticRetryTimer invalidate];
-    automaticRetryTimer = nil;
+    [self cancelAutomaticRetry];
     BOOL shouldDisable = [self allowsAutomaticDisableWithSessionDictionary:sessionDictionary];
     BOOL succeeded = shouldDisable ? [yk disable] : [yk enable];
     if (!succeeded || (!shouldDisable && screenLocked &&

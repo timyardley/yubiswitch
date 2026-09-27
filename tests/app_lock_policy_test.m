@@ -46,13 +46,16 @@
 @interface FakeMonitor : NSObject
 @property(nonatomic) BOOL allowsDisable;
 @property(nonatomic) NSUInteger scheduledRetries;
+@property(nonatomic) NSUInteger cancelledRetries;
 - (BOOL)allowsAutomaticDisable;
 - (void)scheduleAutomaticRetry;
+- (void)cancelAutomaticRetry;
 @end
 
 @implementation FakeMonitor
 - (BOOL)allowsAutomaticDisable { return self.allowsDisable; }
 - (void)scheduleAutomaticRetry { self.scheduledRetries++; }
+- (void)cancelAutomaticRetry { self.cancelledRetries++; }
 @end
 
 @interface FakeDefaultsController : NSObject
@@ -148,6 +151,28 @@ int main(void) {
         assert([PreferencesController validatedSwitchOffInterval:@"-2"] == 0);
         assert([PreferencesController validatedSwitchOffInterval:@"abc"] == 0);
 
+        [delegate enableYubiKey:YES];
+        assert(monitor.cancelledRetries > 0);
+        assert([delegate pendingDisableTimer] != nil);
+        // A direct action must use the current key state, even before the
+        // status-bar refresh has caught up with an automatic change.
+        key.disabled = YES;
+        NSUInteger enablesBefore = key.enables;
+        [delegate toggle:nil];
+        assert(key.enables == enablesBefore + 1);
+        assert(!key.disabled && [delegate status]);
+        key.disabled = YES;
+        assert(![delegate status]);
+        [delegate enableYubiKey:NO];
+        key.disabled = NO;
+        NSUInteger disablesBeforeToggle = key.disables;
+        [delegate toggle:nil];
+        assert(key.disables == disablesBeforeToggle + 1);
+        assert(key.disabled && ![delegate status]);
+        NSUInteger cancelsBefore = monitor.cancelledRetries;
+        key.failNextDisable = YES;
+        [delegate enableYubiKey:NO];
+        assert(monitor.cancelledRetries == cancelsBefore);
         [delegate enableYubiKey:YES];
         assert([delegate pendingDisableTimer] != nil);
         [[NSUserDefaults standardUserDefaults]

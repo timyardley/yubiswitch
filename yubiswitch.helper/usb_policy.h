@@ -27,7 +27,6 @@ typedef struct {
     bool (*setConfiguration)(void *, const USBPolicyDevice *, unsigned char);
     bool (*setSuspended)(void *, const USBPolicyDevice *, bool);
     bool (*isReady)(void *, const USBPolicyDevice *);
-    void (*disableRemoteWake)(void *, const USBPolicyDevice *);
 } USBPolicyOps;
 
 typedef struct {

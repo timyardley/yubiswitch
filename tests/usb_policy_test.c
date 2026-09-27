@@ -126,12 +126,6 @@ static bool is_ready(void *context, const USBPolicyDevice *device) {
            fake->configurations[index] != 0;
 }
 
-static void disable_remote_wake(void *context,
-                                const USBPolicyDevice *device) {
-    (void)context;
-    (void)device;
-}
-
 static bool configure_hid(void *context, int vendor, int product) {
     Fake *fake = context;
     if (fake->failHIDForNewFilter && vendor == 0x2222) return false;
@@ -150,7 +144,7 @@ static USBPolicyOps operations(Fake *fake) {
     return (USBPolicyOps){fake, list_devices, release_devices,
                           get_configuration, get_recovery_configuration,
                           set_configuration,
-                          set_suspended, is_ready, disable_remote_wake};
+                          set_suspended, is_ready};
 }
 
 static USBPolicyHIDOps hid_operations(Fake *fake) {
@@ -336,6 +330,42 @@ static void test_identity_without_registry_id_uses_location(void) {
     usb_policy_clear(&policy);
 }
 
+static void test_replacement_at_same_port_does_not_get_old_configuration(void) {
+    Fake fake = {0};
+    USBPolicy policy = {0};
+    add_device(&fake, 0x1050, 0x0407, 11, 100);
+    USBPolicyOps ops = operations(&fake);
+    assert(usb_policy_disable(&policy, &ops, 0x1050, 0x0407));
+    // The original key is unplugged. A different matching key uses the port.
+    fake.devices[0].registryID = 12;
+    fake.configurations[0] = 2;
+    fake.uniqueConfigurations[0] = 2;
+    fake.suspended[0] = false;
+    int restoresBefore = fake.restoreCalls;
+    assert(usb_policy_restore(&policy, &ops, 0x1050, 0x0407));
+    assert(fake.configurations[0] == 2);
+    assert(fake.restoreCalls == restoresBefore);
+    assert(!usb_policy_has_pending(&policy));
+    usb_policy_clear(&policy);
+}
+
+static void test_replacement_disabled_at_same_port_retires_old_record(void) {
+    Fake fake = {0};
+    USBPolicy policy = {0};
+    add_device(&fake, 0x1050, 0x0407, 11, 100);
+    USBPolicyOps ops = operations(&fake);
+    assert(usb_policy_disable(&policy, &ops, 0x1050, 0x0407));
+    fake.devices[0].registryID = 12;
+    fake.configurations[0] = 2;
+    fake.uniqueConfigurations[0] = 2;
+    fake.suspended[0] = false;
+    assert(usb_policy_disable(&policy, &ops, 0x1050, 0x0407));
+    assert(usb_policy_restore(&policy, &ops, 0x1050, 0x0407));
+    assert(fake.configurations[0] == 2);
+    assert(!usb_policy_has_pending(&policy));
+    usb_policy_clear(&policy);
+}
+
 static void test_filter_change_rolls_back_when_hid_setup_fails(void) {
     Fake fake = {0};
     USBPolicy policy = {0};
@@ -418,10 +448,12 @@ int main(void) {
     test_helper_restart_rejects_ambiguous_configuration();
     test_controller_loss_restores_every_filter();
     test_identity_without_registry_id_uses_location();
+    test_replacement_at_same_port_does_not_get_old_configuration();
+    test_replacement_disabled_at_same_port_retires_old_record();
     test_filter_change_rolls_back_when_hid_setup_fails();
     test_not_ready_does_not_report_restored();
     test_filter_change_restores_partial_new_disable();
     test_filter_change_reapplies_old_disable_after_unready_restore();
-    puts("usb_policy_test: 16 passed");
+    puts("usb_policy_test: 18 passed");
     return 0;
 }

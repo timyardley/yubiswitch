@@ -235,6 +235,7 @@
     } else {
         res = [yk disable];
     }
+    if (res) [state_monitor cancelAutomaticRetry];
     if (res == TRUE && [yk isStateKnown]) {
         displayedStateKnown = true;
         [statusItem.button setTitle:@""];
@@ -272,7 +273,7 @@
 }
 
 - (bool)status {
-    return [yk isStateKnown] && isEnabled;
+    return [yk isStateKnown] && ![yk state];
 }
 
 - (bool)statusKnown {
@@ -282,7 +283,7 @@
 - (IBAction)toggle:(id)sender {
     if (![yk isStateKnown]) {
         [self enableYubiKey:TRUE];
-    } else if (isEnabled == TRUE) {
+    } else if (![yk state]) {
         [self enableYubiKey:FALSE];
     } else {
         [self enableYubiKey:TRUE];

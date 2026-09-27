@@ -182,7 +182,10 @@
         NSString *oldVendor = selectedVendorID;
         NSString *oldProduct = selectedProductID;
         BOOL changedHelper = NO;
-        if (suspend || !stateKnown) {
+        // Unknown physical state does not imply a request to keep the key off.
+        // KeyOn clears the helper's disabled policy even when the key is absent
+        // or the restore has not completed yet.
+        if (requestedDisabled) {
             if (![self action:@"disable" vendorID:vendor productID:product]) {
                 preferences[@"applySucceeded"] = @NO;
                 return;
@@ -253,6 +256,7 @@ static BOOL parseHexID(NSString *text, unsigned int *value) {
         NSLog(@"Invalid YubiKey vendor or product filter");
         return NO;
     }
+    requestedDisabled = !enabling;
     if (helperConnection == NULL) {
         helperConnection = xpc_connection_create_mach_service(
             "com.zgilburd.yubiswitch.helper", NULL,

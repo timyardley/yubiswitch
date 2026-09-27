@@ -22,5 +22,6 @@
 - (BOOL)isScreenLocked;
 - (BOOL)allowsAutomaticDisable;
 - (void)scheduleAutomaticRetry;
+- (void)cancelAutomaticRetry;
 
 @end

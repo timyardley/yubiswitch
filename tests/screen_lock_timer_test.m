@@ -171,6 +171,16 @@ int main(void) {
             @{@"CGSSessionScreenIsLocked": @NO}];
         assert(retryKey.disables == 3);
         assert([retryMonitor pendingAutomaticRetry] == nil);
+        retryKey.failNextDisable = YES;
+        [retryMonitor receive:[NSNotification notificationWithName:
+            @"com.apple.screenIsUnlocked" object:nil]];
+        NSTimer *cancelled = [retryMonitor pendingAutomaticRetry];
+        assert(cancelled != nil);
+        [retryMonitor cancelAutomaticRetry];
+        assert([retryMonitor pendingAutomaticRetry] == nil);
+        NSUInteger disablesBeforeCancel = retryKey.disables;
+        [cancelled fire];
+        assert(retryKey.disables == disablesBeforeCancel);
         puts("screen_lock_timer_test: lock state tracked");
     }
     return 0;

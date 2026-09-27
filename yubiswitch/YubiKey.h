@@ -37,6 +37,7 @@
 
 @interface YubiKey : NSObject {
     BOOL suspend;
+    BOOL requestedDisabled;
     BOOL stateKnown;
     BOOL changingState;
     BOOL lockOnRemoval;

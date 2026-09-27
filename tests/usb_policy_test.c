@@ -236,6 +236,22 @@ static void test_disconnected_key_keeps_restore_record(void) {
     usb_policy_clear(&policy);
 }
 
+static void test_controller_loss_restores_every_filter(void) {
+    Fake fake = {0};
+    USBPolicy policy = {0};
+    add_device(&fake, 0x1111, 0x0001, 11, 100);
+    add_device(&fake, 0x2222, 0x0002, 12, 200);
+    USBPolicyOps ops = operations(&fake);
+    assert(usb_policy_disable(&policy, &ops, 0x1111, 0x0001));
+    assert(usb_policy_disable(&policy, &ops, 0x2222, 0x0002));
+    assert(usb_policy_has_pending(&policy));
+    assert(usb_policy_restore_all(&policy, &ops));
+    assert(fake.configurations[0] == 1);
+    assert(fake.configurations[1] == 1);
+    assert(!usb_policy_has_pending(&policy));
+    usb_policy_clear(&policy);
+}
+
 static void test_identity_without_registry_id_uses_location(void) {
     Fake fake = {0};
     USBPolicy policy = {0};
@@ -324,11 +340,12 @@ int main(void) {
     test_port_move_restores_new_attachment();
     test_two_identical_keys_are_both_restored();
     test_disconnected_key_keeps_restore_record();
+    test_controller_loss_restores_every_filter();
     test_identity_without_registry_id_uses_location();
     test_filter_change_rolls_back_when_hid_setup_fails();
     test_not_ready_does_not_report_restored();
     test_filter_change_restores_partial_new_disable();
     test_filter_change_reapplies_old_disable_after_unready_restore();
-    puts("usb_policy_test: 11 passed");
+    puts("usb_policy_test: 12 passed");
     return 0;
 }

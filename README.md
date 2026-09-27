@@ -115,6 +115,7 @@ Preference window:
 - A question mark in the menu bar means YubiSwitch could not confirm the key's state. Try enabling it again after the USB device has finished appearing. If the privileged helper restarted while the key was deconfigured, unplug and reconnect the key before retrying. AppleScript exposes `statusKnown` to distinguish an unknown state from a confirmed disabled state.
 - An enabled indication confirms that a matching key is attached and its selected USB configuration and interfaces have returned. If the key is disconnected, its status remains unknown even though the helper has cleared the disabled policy. Interface enumeration does not prove that an OTP, FIDO, or smart-card authentication succeeds. Test the function you use after installing a properly signed build.
 - The Vendor ID and Product ID filter applies to every matching attached device. YubiSwitch keeps separate restore information for matching devices at different USB locations.
+- If the app exits unexpectedly, the helper attempts to restore the key when its controlling XPC connection closes. Confirm this recovery on a signed build before relying on it.
 - The app's default settings support the Nano. If you have a different model, go into the app's `Preferences` by clicking on the menu icon, then set the the `Product ID` to `0x0114` (or whatever your ProductID is) see: [How to find ProductID and VendorID](#how-to-find-productid-and-vendorid).
 - If your YubiKey is not working, you might want to confirm the `Product ID` and `Vendor ID` follow the how to find your ProductID and VendorID steps below
 - This app only works with recent version of OSX because it relies on the Notification Centre. OSX 10.8.x and above would do it. Sorry about that.
@@ -136,14 +137,16 @@ Preference window:
 
 You need to make sure that you sign all applications and frameworks, also you need to make sure the `dmg` file is signed (the bash script `createdmg.sh` does this for you). You need to sign the app with an official Mac developer profile.
 
-The USB policy regression checks can run without a signing identity:
+The USB policy and client-requirement checks can run without a signing identity:
 
 ```sh
 clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined tests/usb_policy_test.c yubiswitch.helper/usb_policy.c -o /tmp/yubiswitch-usb-policy-test
 /tmp/yubiswitch-usb-policy-test
+clang -std=c11 -Wall -Wextra -Werror tests/client_identity_test.c -framework Security -framework CoreFoundation -o /tmp/yubiswitch-client-identity-test
+/tmp/yubiswitch-client-identity-test yubiswitch.helper/yubiswitch-helper-Info.plist
 ```
 
-An unsigned Xcode build is a compile check only. Do not launch it against an existing helper installation. Installing and cycling the device requires a signing identity accepted by the app and helper requirements.
+An unsigned Xcode build is a compile check only. Do not launch it against an existing helper installation. The helper rejects XPC requests from apps that do not match its signed client requirement. Installing and cycling the device requires a signing identity accepted by the app and helper requirements.
 
 When you want to create a release:
 

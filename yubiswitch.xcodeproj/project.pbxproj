@@ -119,6 +119,7 @@
 		593AE45F1B1371B700FCA848 /* main.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = main.c; sourceTree = "<group>"; };
 		63A7A01AFA6C4F6B9D000002 /* usb_policy.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = usb_policy.c; sourceTree = "<group>"; };
 		63A7A01AFA6C4F6B9D000003 /* usb_policy.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = usb_policy.h; sourceTree = "<group>"; };
+		63A7A01AFA6C4F6B9D000004 /* client_identity.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = client_identity.h; sourceTree = "<group>"; };
 		593B4E0617F09362003195DE /* AboutWindowController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AboutWindowController.h; sourceTree = "<group>"; };
 		593B4E0717F09362003195DE /* AboutWindowController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = AboutWindowController.m; sourceTree = "<group>"; };
 		593B4E0817F09362003195DE /* AboutWindowController.xib */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.xib; path = AboutWindowController.xib; sourceTree = "<group>"; };
@@ -211,6 +212,7 @@
 				593AE45F1B1371B700FCA848 /* main.c */,
 				63A7A01AFA6C4F6B9D000002 /* usb_policy.c */,
 				63A7A01AFA6C4F6B9D000003 /* usb_policy.h */,
+				63A7A01AFA6C4F6B9D000004 /* client_identity.h */,
 				59EF40681B13CDC20000BB5F /* yubiswitch-helper-launchd.plist */,
 			);
 			path = yubiswitch.helper;

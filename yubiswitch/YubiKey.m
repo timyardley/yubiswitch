@@ -253,39 +253,56 @@ static BOOL parseHexID(NSString *text, unsigned int *value) {
         NSLog(@"Invalid YubiKey vendor or product filter");
         return NO;
     }
-    xpc_connection_t connection = xpc_connection_create_mach_service(
-                                                                     "com.zgilburd.yubiswitch.helper", NULL,
-                                                                     XPC_CONNECTION_MACH_SERVICE_PRIVILEGED);
-
-    if (!connection) {
-        [self raiseAlertWindow:@"Failed to create XPC connection with helper"];
-        stateKnown = NO;
-        return NO;
-    }
-
-    xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
-        xpc_type_t type = xpc_get_type(event);
-        if (type == XPC_TYPE_ERROR) {
+    if (helperConnection == NULL) {
+        helperConnection = xpc_connection_create_mach_service(
+            "com.zgilburd.yubiswitch.helper", NULL,
+            XPC_CONNECTION_MACH_SERVICE_PRIVILEGED);
+        if (helperConnection == NULL) {
+            [self raiseAlertWindow:@"Failed to create XPC connection with helper"];
+            stateKnown = NO;
+            return NO;
+        }
+        helperConnectionGeneration++;
+        uint64_t connectionGeneration = helperConnectionGeneration;
+        __weak YubiKey *weakSelf = self;
+        xpc_connection_set_event_handler(helperConnection, ^(xpc_object_t event) {
+            if (xpc_get_type(event) != XPC_TYPE_ERROR) return;
+            YubiKey *key = weakSelf;
+            if (key == nil) return;
+            BOOL invalid = event == XPC_ERROR_CONNECTION_INVALID;
+            uint_fast64_t completedGeneration = atomic_load_explicit(
+                &key->completedActionGeneration, memory_order_relaxed);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                YubiKey *currentKey = weakSelf;
+                if (currentKey == nil ||
+                    currentKey->helperConnectionGeneration != connectionGeneration ||
+                    atomic_load_explicit(&currentKey->completedActionGeneration,
+                                         memory_order_relaxed) != completedGeneration) return;
+                currentKey->stateKnown = NO;
+                if (invalid) {
+                    xpc_connection_cancel(currentKey->helperConnection);
+                    currentKey->helperConnection = NULL;
+                }
+            });
             if (event == XPC_ERROR_CONNECTION_INTERRUPTED) {
-                // probably helper has been killed, relaunching it?
-                NSLog(@"XPC connection interupted.");
+                NSLog(@"XPC connection interrupted.");
             } else if (event == XPC_ERROR_CONNECTION_INVALID) {
-                NSLog(@"XPC connection invalid, releasing.");
+                NSLog(@"XPC connection invalid.");
+            } else if (event == XPC_ERROR_PEER_CODE_SIGNING_REQUIREMENT) {
+                NSLog(@"Helper rejected the app signing identity.");
             } else {
                 NSLog(@"Unexpected XPC connection error.");
             }
-        } else {
-            NSLog(@"Unexpected XPC connection event.");
-        }
-    });
+        });
+        xpc_connection_resume(helperConnection);
+    }
 
     changingState = YES;
-    xpc_connection_resume(connection);
     xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
     xpc_dictionary_set_int64(message, "idVendor", idVendor);
     xpc_dictionary_set_int64(message, "idProduct", idProduct);
     xpc_dictionary_set_int64(message, "request", enabling ? 1 : 0);
-    xpc_object_t event = xpc_connection_send_message_with_reply_sync(connection, message);
+    xpc_object_t event = xpc_connection_send_message_with_reply_sync(helperConnection, message);
     const char *response = xpc_get_type(event) == XPC_TYPE_DICTIONARY ?
         xpc_dictionary_get_string(event, "reply") : NULL;
     BOOL present = response != NULL && strcmp(response, "OK") == 0;
@@ -293,12 +310,17 @@ static BOOL parseHexID(NSString *text, unsigned int *value) {
         strcmp(response, "ABSENT") == 0;
     BOOL succeeded = present || absent;
     stateKnown = present;
+    atomic_fetch_add_explicit(&completedActionGeneration, 1,
+                              memory_order_relaxed);
     if (succeeded) {
         suspend = !enabling;
         lockOnRemoval = enabling;
     }
     changingState = NO;
-    xpc_connection_cancel(connection);
+    if (event == XPC_ERROR_CONNECTION_INVALID) {
+        xpc_connection_cancel(helperConnection);
+        helperConnection = NULL;
+    }
     return succeeded;
     // NSAppleScript *lockScript = [[NSAppleScript alloc]
     // initWithSource:@"activate application \"ScreenSaverEngine\""];
@@ -322,14 +344,19 @@ static BOOL parseHexID(NSString *text, unsigned int *value) {
     return [self action:@"disable"];
 }
 
+- (void)dealloc {
+    if (helperConnection != NULL) xpc_connection_cancel(helperConnection);
+}
+
 
 // deal with disconnection of device from usb port
 
 static void handle_removal_callback(void *context, IOReturn result,
                                     void *sender, IOHIDDeviceRef device) {
     YubiKey *key = (__bridge YubiKey *)context;
-    if ([key isChangingState] || !key->lockOnRemoval ||
-        sender != key->removalManager) return;
+    if (sender != key->removalManager || [key isChangingState]) return;
+    if (!key->suspend) key->stateKnown = NO;
+    if (!key->lockOnRemoval) return;
     if ([[NSUserDefaults standardUserDefaults] boolForKey:@"lockWhenUnplugged"]) {
         NSLog(@"YubiKey removed, locking computer");
         NSAppleScript *lockScript =

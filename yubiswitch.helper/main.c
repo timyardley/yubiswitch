@@ -38,6 +38,7 @@
 #import <ServiceManagement/ServiceManagement.h>
 #import <Security/Authorization.h>
 #include "usb_policy.h"
+#include "client_identity.h"
 
 
 IOHIDManagerRef hidManager;
@@ -47,6 +48,7 @@ static Boolean desiredDisabled;
 static int selectedVendorID;
 static int selectedProductID;
 static uint64_t requestGeneration;
+static xpc_connection_t controllerConnection;
 static IONotificationPortRef usbNotifyPort;
 static io_iterator_t usbAddedIterator;
 
@@ -442,11 +444,28 @@ static void usb_matched_callback(void *context, io_iterator_t iterator) {
     }
 }
 
+static void controller_disconnected(xpc_connection_t connection) {
+    if (controllerConnection != connection) return;
+    xpc_release(controllerConnection);
+    controllerConnection = NULL;
+    requestGeneration++;
+    desiredDisabled = false;
+    close_hid_manager();
+    if (!usb_device_enable()) {
+        ylog("App connection lost before USB restore completed");
+        schedule_usb_reconcile(8, requestGeneration);
+    }
+}
+
 static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
                                      xpc_object_t event) {
     xpc_type_t type = xpc_get_type(event);
 
     if (type == XPC_TYPE_ERROR) {
+        if (event == XPC_ERROR_CONNECTION_INVALID ||
+            event == XPC_ERROR_CONNECTION_INTERRUPTED) {
+            controller_disconnected(connection);
+        }
         const char *description = xpc_dictionary_get_string(event, XPC_ERROR_KEY_DESCRIPTION);
         ylog( "XPC error: %s", description);
         return;
@@ -459,6 +478,10 @@ static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
     Boolean valid = (action == 0 || action == 1) &&
                     vendor > 0 && vendor <= UINT16_MAX &&
                     product > 0 && product <= UINT16_MAX;
+    if (valid && controllerConnection == NULL) {
+        controllerConnection = xpc_retain(connection);
+    }
+    if (controllerConnection != connection) valid = false;
     Boolean success = false;
     bool selectedPresent = true;
     if (valid && action == 1) {
@@ -511,6 +534,8 @@ static void __XPC_Peer_Event_Handler(xpc_connection_t connection,
 }
 
 static void __XPC_Connection_Handler(xpc_connection_t connection) {
+    // USB policy and IOKit callbacks share state on the main queue.
+    xpc_connection_set_target_queue(connection, dispatch_get_main_queue());
     xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
         __XPC_Peer_Event_Handler(connection, event);
     });
@@ -591,6 +616,13 @@ int main(int argc, const char *argv[]) {
 
     if (!service) {
         ylog( "Failed to create service.");
+        exit(EXIT_FAILURE);
+    }
+
+    if (xpc_connection_set_peer_code_signing_requirement(
+            service, YUBISWITCH_CLIENT_REQUIREMENT) != 0) {
+        ylog("Could not enforce XPC client signing requirement");
+        xpc_connection_cancel(service);
         exit(EXIT_FAILURE);
     }
 

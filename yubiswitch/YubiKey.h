@@ -30,6 +30,9 @@
 #include <IOKit/usb/USBSpec.h>
 #include <IOKit/hid/IOHIDManager.h>
 #include <IOKit/hid/IOHIDKeys.h>
+#include <xpc/xpc.h>
+#include <stdatomic.h>
+#include <stdint.h>
 
 
 @interface YubiKey : NSObject {
@@ -40,6 +43,9 @@
     NSString *selectedVendorID;
     NSString *selectedProductID;
     IOHIDManagerRef removalManager;
+    xpc_connection_t helperConnection;
+    uint64_t helperConnectionGeneration;
+    atomic_uint_fast64_t completedActionGeneration;
 }
 
 -(id)init;
